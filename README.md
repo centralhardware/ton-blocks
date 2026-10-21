@@ -7,7 +7,7 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 
 | table | content | retention |
 |---|---|---|
-| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, success/exit code, account status before/after, and `trace_id`. No other hashes, no per-block rows, no masterchain tick-tock. | 90 days (TTL) |
+| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, success/exit code, why the code didn't run (`skip_reason`), action phase result (`action_code`), account status before/after, and `trace_id`. No other hashes, no per-block rows, no masterchain tick-tock. | 90 days (TTL) |
 | `minute` | per minute and workchain: blocks, txs, failed, external-in, volume, fees, out messages, unique accounts/senders (`uniqMerge`), accounts created/deployed/frozen/deleted | forever |
 | `ops_hour` | per hour, workchain and op code (`-1` = no body, `0` = text comment): txs, failed, volume, fees | forever |
 | `account_state` | every account seen in a transaction: latest status (argMax by lt), first/last seen, txs, failed, received, fees | forever |
