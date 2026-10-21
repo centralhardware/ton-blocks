@@ -12,3 +12,16 @@ CREATE TABLE IF NOT EXISTS ton.contracts (
 )
 ENGINE = ReplacingMergeTree(resolved_at)
 ORDER BY account;
+
+-- the code itself, once per distinct code hash: code_boc is the code cell as a
+-- base64 BOC (bytecode, not source; a contract deployed as a library holds just
+-- the library reference). example is an account that runs it.
+CREATE TABLE IF NOT EXISTS ton.code (
+    code_hash        String,
+    code_boc         String CODEC(ZSTD(3)),
+    size             UInt32,
+    example          String,
+    resolved_at      DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(resolved_at)
+ORDER BY code_hash;

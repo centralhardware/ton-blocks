@@ -18,6 +18,7 @@ const (
 	contractEvery    = time.Minute
 	contractLookback = 7 * 24 * 3600 // seconds of transactions to look for new accounts in
 	contractRetry    = 6 * 3600      // seconds before asking about an account without code again
+	codeBatch        = 20            // accounts per BOC request: their data comes along and can be large
 )
 
 type contract struct {
@@ -69,6 +70,45 @@ func lookupContracts(accounts []string) ([]contract, error) {
 	return res, nil
 }
 
+type code struct {
+	CodeHash string `json:"code_hash"`
+	CodeBOC  string `json:"code_boc"`
+	Size     int    `json:"size"`
+	Example  string `json:"example"`
+}
+
+// newCode returns one example account for each code hash not yet in ton.code.
+func newCode() ([]string, error) {
+	out, err := post(fmt.Sprintf("SELECT any(account) FROM %[1]s.contracts FINAL "+
+		"WHERE code_hash != '' AND code_hash NOT IN (SELECT code_hash FROM %[1]s.code) "+
+		"GROUP BY code_hash LIMIT %[2]d FORMAT TSV", database, contractQuery), nil)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}
+
+func fetchCode(accounts []string) ([]code, error) {
+	var body struct {
+		Accounts []struct {
+			Address  string
+			CodeHash string `json:"code_hash"`
+			CodeBOC  string `json:"code_boc"`
+		} `json:"accounts"`
+	}
+	q := url.Values{"address": accounts, "include_boc": {"true"}}
+	if err := toncenterGet("accountStates", q, &body); err != nil {
+		return nil, err
+	}
+	var res []code
+	for _, a := range body.Accounts {
+		if a.CodeHash != "" && a.CodeBOC != "" {
+			res = append(res, code{a.CodeHash, a.CodeBOC, len(a.CodeBOC) * 3 / 4, strings.ToLower(a.Address)})
+		}
+	}
+	return res, nil
+}
+
 // resolveContracts runs forever next to the follower, like resolveJettons.
 func resolveContracts() {
 	for {
@@ -92,6 +132,18 @@ func resolveContracts() {
 		}
 		if total >= 10000 {
 			log.Printf("contract lookup: %d accounts", total)
+		}
+		// then the code of hashes seen for the first time; a hash whose example
+		// account changed code meanwhile is just asked again next round
+		accounts, err := newCode()
+		for i := 0; err == nil && i < len(accounts); i += codeBatch {
+			var cs []code
+			if cs, err = fetchCode(accounts[i:min(i+codeBatch, len(accounts))]); err == nil {
+				err = insert("code", cs)
+			}
+		}
+		if err != nil {
+			log.Printf("code lookup: %v", err)
 		}
 		time.Sleep(contractEvery)
 	}
