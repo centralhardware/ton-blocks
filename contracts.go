@@ -75,6 +75,8 @@ type code struct {
 	CodeBOC  string `json:"code_boc"`
 	Size     int    `json:"size"`
 	Example  string `json:"example"`
+	Asm      string `json:"asm"`
+	AsmError string `json:"asm_error"`
 }
 
 // newCode returns one example account for each code hash not yet in ton.code.
@@ -103,7 +105,7 @@ func fetchCode(accounts []string) ([]code, error) {
 	var res []code
 	for _, a := range body.Accounts {
 		if a.CodeHash != "" && a.CodeBOC != "" {
-			res = append(res, code{a.CodeHash, a.CodeBOC, len(a.CodeBOC) * 3 / 4, strings.ToLower(a.Address)})
+			res = append(res, code{CodeHash: a.CodeHash, CodeBOC: a.CodeBOC, Size: len(a.CodeBOC) * 3 / 4, Example: strings.ToLower(a.Address)})
 		}
 	}
 	return res, nil
@@ -154,6 +156,11 @@ func resolveContracts() {
 		}
 		if err != nil {
 			log.Printf("code lookup: %v", err)
+		}
+		if fiftAvailable() {
+			if err := disassembleNewCode(); err != nil {
+				log.Printf("disassembly: %v", err)
+			}
 		}
 		time.Sleep(contractEvery)
 	}
