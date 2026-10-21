@@ -114,14 +114,20 @@ func resolveContracts() {
 	for {
 		total := 0
 		for {
+			// one INSERT per round of contractQuery accounts, not per toncenter
+			// request: each insert is a part, and requests come every second
 			accounts, err := unresolvedAccounts()
+			var batch []contract
 			for i := 0; err == nil && i < len(accounts); i += contractBatch {
 				var cs []contract
 				if cs, err = lookupContracts(accounts[i:min(i+contractBatch, len(accounts))]); err == nil {
-					err = insert("contracts", cs)
-					total += len(cs)
+					batch = append(batch, cs...)
 				}
 			}
+			if ierr := insert("contracts", batch); ierr != nil && err == nil {
+				err = ierr
+			}
+			total += len(batch)
 			if err != nil {
 				log.Printf("contract lookup: %v", err)
 				break
@@ -136,11 +142,15 @@ func resolveContracts() {
 		// then the code of hashes seen for the first time; a hash whose example
 		// account changed code meanwhile is just asked again next round
 		accounts, err := newCode()
+		var codes []code
 		for i := 0; err == nil && i < len(accounts); i += codeBatch {
 			var cs []code
 			if cs, err = fetchCode(accounts[i:min(i+codeBatch, len(accounts))]); err == nil {
-				err = insert("code", cs)
+				codes = append(codes, cs...)
 			}
+		}
+		if ierr := insert("code", codes); ierr != nil && err == nil {
+			err = ierr
 		}
 		if err != nil {
 			log.Printf("code lookup: %v", err)
