@@ -1,0 +1,14 @@
+services:
+  ton-blocks:
+    image: ghcr.io/centralhardware/ton-blocks:latest
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://10.168.0.32:8123}
+      CLICKHOUSE_TON_USER: ${CLICKHOUSE_TON_USER:-claude_ton}
+      CLICKHOUSE_TON_PASSWORD: ${CLICKHOUSE_TON_PASSWORD:?set CLICKHOUSE_TON_PASSWORD}
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

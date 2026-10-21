@@ -1,0 +1,2 @@
+pytoniq==0.1.43
+pytoniq-core==0.2.1
