@@ -354,6 +354,8 @@ type row struct {
 	TotalFees  uint64  `json:"total_fees"`
 	Success    uint8   `json:"success"`
 	ExitCode   *int32  `json:"exit_code"`
+	SkipReason string  `json:"skip_reason"`
+	ActionCode *int32  `json:"action_code"`
 	OutMsgs    uint16  `json:"out_msgs"`
 	OrigStatus string  `json:"orig_status"`
 	EndStatus  string  `json:"end_status"`
@@ -420,20 +422,38 @@ func isTickTock(tx *tlb.Transaction) bool {
 	return false
 }
 
-func exitCode(tx *tlb.Transaction) *int32 {
+// exitCode is the compute phase's exit code; when the phase was skipped there
+// is none and skip is why (NO_STATE, BAD_STATE, NO_GAS, SUSPENDED).
+func exitCode(tx *tlb.Transaction) (code *int32, skip string) {
 	f := descField(tx.Description, "ComputePhase")
 	if !f.IsValid() {
-		return nil
+		return nil, ""
 	}
 	cp, ok := f.Interface().(tlb.ComputePhase)
 	if !ok {
-		return nil
+		return nil, ""
 	}
 	switch p := cp.Phase.(type) {
 	case tlb.ComputePhaseVM:
-		return &p.Details.ExitCode
+		return &p.Details.ExitCode, ""
 	case *tlb.ComputePhaseVM:
-		return &p.Details.ExitCode
+		return &p.Details.ExitCode, ""
+	case tlb.ComputePhaseSkipped:
+		return nil, string(p.Reason.Type)
+	case *tlb.ComputePhaseSkipped:
+		return nil, string(p.Reason.Type)
+	}
+	return nil, ""
+}
+
+// actionCode is the action phase's result code, nil when it didn't run.
+func actionCode(tx *tlb.Transaction) *int32 {
+	f := descField(tx.Description, "ActionPhase")
+	if !f.IsValid() {
+		return nil
+	}
+	if ap, ok := f.Interface().(*tlb.ActionPhase); ok && ap != nil {
+		return &ap.ResultCode
 	}
 	return nil
 }
@@ -449,12 +469,13 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 		InMsgType:  msgType(tx.IO.In),
 		TotalFees:  tx.TotalFees.Coins.Nano().Uint64(),
 		Success:    1,
-		ExitCode:   exitCode(tx),
+		ActionCode: actionCode(tx),
 		OutMsgs:    tx.OutMsgCount,
 		OrigStatus: statuses[tx.OrigStatus],
 		EndStatus:  statuses[tx.EndStatus],
 		TraceID:    trace.String(),
 	}
+	r.ExitCode, r.SkipReason = exitCode(tx)
 	if a := descField(tx.Description, "Aborted"); a.IsValid() && a.Bool() {
 		r.Success = 0
 	}
