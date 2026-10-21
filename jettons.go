@@ -15,7 +15,8 @@ import (
 // toncenter's index for the wallets seen in recent jetton ops and stores the
 // mapping in ton.jetton_wallets, plus each master's name in ton.jettons.
 const (
-	jettonBatch    = 100
+	jettonBatch    = 100  // addresses per toncenter request
+	jettonQuery    = 2000 // wallets fetched from ClickHouse, and inserted, per round
 	jettonEvery    = time.Minute
 	jettonLookback = 7 * 24 * 3600 // seconds of transactions to look for new wallets in
 	jettonRetry    = 6 * 3600      // seconds before asking about an unknown wallet again
@@ -46,7 +47,7 @@ func unresolvedWallets() ([]string, error) {
 	out, err := post(fmt.Sprintf("SELECT DISTINCT account FROM %[1]s.transactions "+
 		"WHERE now > now() - %[2]d AND op IN (%[3]s) AND account NOT IN "+
 		"(SELECT wallet FROM %[1]s.jetton_wallets FINAL WHERE jetton != '' OR resolved_at > now() - %[4]d) "+
-		"LIMIT %[5]d FORMAT TSV", database, jettonLookback, strings.Join(ops, ","), jettonRetry, jettonBatch), nil)
+		"LIMIT %[5]d FORMAT TSV", database, jettonLookback, strings.Join(ops, ","), jettonRetry, jettonQuery), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -113,23 +114,31 @@ func resolveJettons() {
 	for {
 		total := 0
 		for {
+			// one INSERT per round, not per toncenter request (see resolveContracts)
 			wallets, err := unresolvedWallets()
-			if err == nil && len(wallets) > 0 {
-				var ws []jettonWallet
-				var js []jetton
-				if ws, js, err = lookupJettons(wallets); err == nil {
-					// masters first: a wallet row never points at a missing name
-					if err = insert("jettons", js); err == nil {
-						err = insert("jetton_wallets", ws)
-					}
+			var ws []jettonWallet
+			var js []jetton
+			for i := 0; err == nil && i < len(wallets); i += jettonBatch {
+				var w []jettonWallet
+				var j []jetton
+				if w, j, err = lookupJettons(wallets[i:min(i+jettonBatch, len(wallets))]); err == nil {
+					ws, js = append(ws, w...), append(js, j...)
 				}
-				total += len(wallets)
 			}
+			// masters first: a wallet row never points at a missing name
+			if ierr := insert("jettons", js); ierr != nil && err == nil {
+				err = ierr
+			} else if ierr == nil {
+				if ierr := insert("jetton_wallets", ws); ierr != nil && err == nil {
+					err = ierr
+				}
+			}
+			total += len(ws)
 			if err != nil {
 				log.Printf("jetton lookup: %v", err)
 				break
 			}
-			if len(wallets) < jettonBatch {
+			if len(wallets) < jettonQuery {
 				break
 			}
 		}
