@@ -1,6 +1,8 @@
 services:
   ton-blocks:
     image: ghcr.io/centralhardware/ton-blocks:latest
+    # :latest moves on every push; without this a redeploy reuses the cached image
+    pull_policy: always
     restart: unless-stopped
     environment:
       CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://10.168.0.32:8123}
