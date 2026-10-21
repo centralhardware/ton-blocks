@@ -15,6 +15,8 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `account_status_counts` (view) | accounts per workchain and status | — |
 | `jetton_wallets` | token wallet → its token (`jetton` master) and owner, resolved through toncenter; `''` = unknown | — |
 | `jettons` | token master → symbol, name, decimals, image | — |
+| `contracts` | account → status, code hash and the interfaces toncenter recognises in that code (`wallet_v5r1`, `jetton_wallet`, `tg_wallet`, …) | — |
+| `code` | the code itself, once per distinct code hash: base64 BOC (bytecode), size, an example account | — |
 | `op_names` | name, protocol, description and source for known op codes, loaded from `op_names.tsv` on every start | — |
 
 The logger writes through a **Buffer** table, `transactions_buffer`. ClickHouse flushes it to `transactions` every 10–30 s, so `transactions` and the views behind it get about 2 parts a minute instead of one per insert. The buffer lives in ClickHouse's memory. A clean server shutdown flushes it, but a crash loses up to 30 s of rows. Every 5 minutes the logger checks the last ~25 minutes for masterchain blocks with no rows and fetches them again. If the server refuses the Buffer table, the logger inserts into `transactions` directly.
@@ -54,6 +56,15 @@ JOIN ton.jetton_wallets w FINAL ON w.wallet = t.account
 JOIN ton.jettons j FINAL ON j.jetton = w.jetton
 WHERE t.op = 0x178d4519 AND t.now > now() - 86400   -- internal_transfer: one per transfer
 GROUP BY j.symbol ORDER BY transfers DESC LIMIT 20
+```
+## Contract types
+
+Which code an account runs is chain state too. A second background loop asks toncenter (`/api/v3/accountStates`, 100 accounts a request) about every account that transacted in the last 7 days and stores its code hash and interfaces in `contracts`. Accounts without code (not deployed) are asked again after 6 hours; an account is looked up once, so a later code upgrade isn't noticed. After each round it also fetches the code of hashes it hasn't seen before (one example account per hash, 20 per request) into `code`. That's bytecode; source exists only where the author verified it (verifier.ton.org). Both loops share one toncenter rate limiter (about 1 request/s, retrying on 429).
+
+```sql
+SELECT if(empty(c.interfaces), 'unknown code', c.interfaces[1]) AS type, count() AS txs, countIf(t.success = 0) AS failed
+FROM ton.transactions t JOIN ton.contracts c FINAL ON c.account = t.account
+WHERE t.now > now() - 3600 GROUP BY type ORDER BY txs DESC
 ```
 
 ## How it follows the chain
