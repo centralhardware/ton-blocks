@@ -58,6 +58,7 @@ import urllib.request
 from pathlib import Path
 
 from pytoniq import LiteBalancer
+from pytoniq.liteclient.client import LiteServerError
 from pytoniq_core.tl import BlockIdExt
 
 DATABASE = "ton"
@@ -66,6 +67,11 @@ TIMEOUT = 60
 FLUSH_SECONDS = 10
 FLUSH_ROWS = 20000
 POLL_SECONDS = 1.0
+# stay this many mc blocks behind the head: the public liteservers sit a few
+# blocks apart, and the balancer would otherwise keep asking one that has not
+# got the newest block yet ("not in db", code 651)
+CONFIRMATIONS = 3
+TRANSIENT_RETRY_SECONDS = 0.5
 # touched after every mc block; the Docker HEALTHCHECK fails when it goes stale
 HEARTBEAT = Path(os.environ.get("TON_HEARTBEAT_FILE", "/tmp/ton-blocks.heartbeat"))
 
@@ -329,12 +335,12 @@ class Follower:
     async def mc_id(self, seqno):
         return (await self.client.lookup_block(-1, MC_SHARD, seqno))[0]
 
-    async def one_block(self, blk_id, mc_seqno):
-        """Buffer one block's transactions; returns its header info (for the prev walk)."""
+    async def one_block(self, blk_id, mc_seqno, rows):
+        """Collect one block's transactions into rows; returns its header info (for the prev walk)."""
         hdr = await self.client.raw_get_block_header(blk_id)
         txs = await self.client.raw_get_block_transactions_ext(blk_id)
-        self.txs.extend(tx_row(blk_id, mc_seqno, t) for t in txs
-                        if getattr(t.description, "type_", "") != "tick_tock")
+        rows.extend(tx_row(blk_id, mc_seqno, t) for t in txs
+                    if getattr(t.description, "type_", "") != "tick_tock")
         return hdr.info
 
     def _covered(self, blk_id, prev_tops):
@@ -342,8 +348,12 @@ class Follower:
                    and t.seqno >= blk_id.seqno for t in prev_tops)
 
     async def process(self, seqno):
+        # rows reach the buffer only once the whole mc block succeeded: a retry
+        # after a half-done block must not insert its first blocks twice (the
+        # table would dedupe them on merge, the summary views would not)
+        rows = []
         mc = await self.mc_id(seqno)
-        await self.one_block(mc, seqno)
+        await self.one_block(mc, seqno, rows)
         tops = await self.client.get_all_shards_info(mc)
         prev_tops = self.prev_tops
         if prev_tops is None:
@@ -356,8 +366,9 @@ class Follower:
             if key in seen or self._covered(b, prev_tops):
                 continue
             seen.add(key)
-            info = await self.one_block(b, seqno)
+            info = await self.one_block(b, seqno, rows)
             queue.extend(prev_ids(b, info))
+        self.txs.extend(rows)
         self.prev_tops = tops
         return len(seen) + 1
 
@@ -383,11 +394,11 @@ async def run(args):
     if nxt is None:
         nxt = f.client.last_mc_block.seqno
     print("following from mc seqno %d" % nxt, flush=True)
-    done, failures = 0, 0
+    done, failures, transient, last_note = 0, 0, 0, time.monotonic()
     while args.count is None or done < args.count:
         try:
             head = (await f.client.get_masterchain_info())["last"]["seqno"]
-            if nxt > head:
+            if nxt > head - CONFIRMATIONS:
                 f.flush()
                 await asyncio.sleep(POLL_SECONDS)
                 continue
@@ -400,6 +411,16 @@ async def run(args):
             failures = 0
             f.flush()
         except Exception as e:
+            if isinstance(e, LiteServerError) and e.code == 651:
+                # a liteserver behind the others: just ask again (the balancer
+                # picks another one); counted and reported once a minute
+                transient += 1
+                f.prev_tops = None
+                if time.monotonic() - last_note >= 60:
+                    print("%d transient 'not in db' retries in the last minute" % transient, flush=True)
+                    transient, last_note = 0, time.monotonic()
+                await asyncio.sleep(TRANSIENT_RETRY_SECONDS)
+                continue
             # a dropped liteserver or a ClickHouse hiccup: rows not yet flushed
             # stay buffered, the mc block is retried, reconnect with backoff
             failures += 1
