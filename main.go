@@ -73,6 +73,7 @@ const (
 	httpTimeout    = 60 * time.Second
 	flushEvery     = 2 * time.Second
 	flushRows      = 20000
+	blocksEvery    = 30 * time.Second // between block_log inserts
 	pollEvery      = time.Second
 	requestTimeout = 20 * time.Second
 	transientRetry = 500 * time.Millisecond
@@ -530,6 +531,42 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 	return r
 }
 
+// blockRow is one block, as ton.block_log stores it.
+type blockRow struct {
+	McSeqno       uint32 `json:"mc_seqno"`
+	Workchain     int32  `json:"workchain"`
+	Shard         string `json:"shard"`
+	SeqNo         uint32 `json:"seqno"`
+	GenUtime      uint32 `json:"gen_utime"`
+	Txs           int    `json:"txs"`
+	CreatedBy     string `json:"created_by"`
+	KeyBlock      bool   `json:"key_block"`
+	BeforeSplit   bool   `json:"before_split"`
+	AfterSplit    bool   `json:"after_split"`
+	AfterMerge    bool   `json:"after_merge"`
+	WantSplit     bool   `json:"want_split"`
+	WantMerge     bool   `json:"want_merge"`
+	CatchainSeqno uint32 `json:"catchain_seqno"`
+	GenVersion    uint32 `json:"gen_version"`
+}
+
+func newBlockRow(mcSeqno uint32, blk *ton.BlockIDExt, data *tlb.Block, txs int) blockRow {
+	h := data.BlockInfo
+	r := blockRow{
+		McSeqno: mcSeqno, Workchain: blk.Workchain, Shard: fmt.Sprintf("%016x", uint64(blk.Shard)),
+		SeqNo: blk.SeqNo, GenUtime: h.GenUtime, Txs: txs, KeyBlock: h.KeyBlock,
+		BeforeSplit: h.BeforeSplit, AfterSplit: h.AfterSplit, AfterMerge: h.AfterMerge,
+		WantSplit: h.WantSplit, WantMerge: h.WantMerge, CatchainSeqno: h.GenCatchainSeqno,
+	}
+	if h.GenSoftware != nil {
+		r.GenVersion = h.GenSoftware.Version
+	}
+	if data.Extra != nil {
+		r.CreatedBy = fmt.Sprintf("%x", data.Extra.CreatedBy)
+	}
+	return r
+}
+
 type blockTx struct {
 	blk *ton.BlockIDExt
 	tx  *tlb.Transaction
@@ -547,6 +584,9 @@ type follower struct {
 	rows     []row
 	traces   map[string]traced // out message hash -> its trace
 	lastSave time.Time
+	blocks   []blockRow // flushed every blocksEvery: a few rows a second only
+	blocksAt time.Time
+	mcSeqno  uint32 // the mc block being processed
 }
 
 func connect(ctx context.Context) (ton.APIClientWrapped, error) {
@@ -576,6 +616,7 @@ func (f *follower) oneBlock(ctx context.Context, blk *ton.BlockIDExt, txs *[]blo
 	for _, t := range list {
 		*txs = append(*txs, blockTx{blk, t})
 	}
+	f.blocks = append(f.blocks, newBlockRow(f.mcSeqno, blk, data, len(list)))
 	return ton.GetParentBlocks(&data.BlockInfo)
 }
 
@@ -660,8 +701,15 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 // the buffer only once the whole mc block succeeded: a retry after a half-done
 // block must not insert its first blocks twice (the table would dedupe them on
 // merge, the summary views would not).
-func (f *follower) process(ctx context.Context, seqno uint32) (int, error) {
+func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error) {
 	var txs []blockTx
+	f.mcSeqno = seqno
+	nBlocks := len(f.blocks)
+	defer func() {
+		if err != nil { // the mc block is retried whole; drop its partial block rows
+			f.blocks = f.blocks[:nBlocks]
+		}
+	}()
 	mc, err := f.mcID(ctx, seqno)
 	if err != nil {
 		return 0, err
@@ -709,6 +757,16 @@ func (f *follower) process(ctx context.Context, seqno uint32) (int, error) {
 }
 
 func (f *follower) flush(force bool) error {
+	if len(f.blocks) > 0 && (force || time.Since(f.blocksAt) >= blocksEvery) {
+		if f.dryRun {
+			first, _ := json.Marshal(f.blocks[0])
+			log.Printf("blocks: %d (first: %s)", len(f.blocks), first)
+		} else if err := insert("block_log", f.blocks); err != nil {
+			return err
+		}
+		f.blocks = nil
+		f.blocksAt = time.Now()
+	}
 	due := force || len(f.rows) >= flushRows || time.Since(f.lastSave) >= flushEvery
 	if !due || len(f.rows) == 0 {
 		return nil
