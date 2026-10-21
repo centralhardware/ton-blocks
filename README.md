@@ -21,6 +21,14 @@ Materialized views fill `minute`, `ops_hour` and `account_state` on every insert
 
 On mainnet (October 2026) the logger sees about 2 masterchain blocks/s and about 35 tx/s, and it keeps up with no lag.
 
+## Schema and migrations
+
+The schema lives in `migrations/NNNN_name.sql`. On every start, the logger applies the files not yet recorded in `ton.schema_migrations`, in order, and records each one. To change the schema, add a new numbered file; never edit one that's already deployed. Statements in a file end with `;` at the end of a line. `python ton_blocks.py --print-ddl` prints them all.
+
+A Buffer table can't be ALTERed. A migration that changes `transactions`' columns should `DROP TABLE ton.transactions_buffer` (dropping flushes it), `ALTER TABLE ton.transactions …`, then recreate the buffer as in `0005`.
+
+`0001`–`0006` are the schema as it was when migrations were introduced. A database that already had that schema was marked at `0006` without running them.
+
 ## Traces
 
 One user action (a swap, an NFT purchase) is one external message that sets off a tree of internal messages, so it spans several transactions, often in different blocks. `trace_id` is the hash of the transaction that started it, as a UInt256. Every transaction in the tree carries the same value. It is the id explorers use:
@@ -33,7 +41,6 @@ FROM ton.transactions WHERE trace_id != 0 GROUP BY trace_id ORDER BY steps DESC 
 
 The logger links each incoming internal message to the trace of the transaction that sent it, keeping sent messages in memory for about 30 minutes. `0` means unknown: the sender was processed before the last restart (or is older than that), or the row predates the column (2026-10-21). The column costs about 32 bytes a row, roughly doubling the table, because hashes don't compress.
 
-Adding the column to an existing table needs `GRANT ALTER ADD COLUMN, DROP TABLE ON ton.* TO claude_ton`. `DROP TABLE` is needed because the Buffer table is recreated, and dropping it flushes it first. Without the grant, the logger keeps running without `trace_id`.
 
 ## How it follows the chain
 
@@ -46,10 +53,10 @@ After a restart it resumes from `max(mc_seqno) + 1`, so outages get backfilled.
    ```sql
    CREATE DATABASE ton;
    CREATE USER claude_ton IDENTIFIED BY '…';
-   GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW, ALTER ADD COLUMN, DROP TABLE ON ton.* TO claude_ton;
+   GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW, ALTER, DROP TABLE ON ton.* TO claude_ton;
    GRANT SELECT ON ton.* TO claude_ro;   -- for Grafana / read-only queries
    ```
-2. In Coolify, create a new resource from **Docker Compose** using `docker-compose.yml` and set `CLICKHOUSE_TON_PASSWORD`. `CLICKHOUSE_URL` and `CLICKHOUSE_TON_USER` have defaults. The service creates its tables on start.
+2. In Coolify, create a new resource from **Docker Compose** using `docker-compose.yml` and set `CLICKHOUSE_TON_PASSWORD`. `CLICKHOUSE_URL` and `CLICKHOUSE_TON_USER` have defaults. The service applies its migrations on start.
 3. Optional: add the Coolify deploy webhook as `COOLIFY_DEPLOY_HOOK_URL` / `COOLIFY_DEPLOY_BEARER_TOKEN` repo secrets. Each push to `main` then builds `ghcr.io/centralhardware/ton-blocks` and redeploys.
 
 The container reports unhealthy if it hasn't processed a masterchain block for 3 minutes.

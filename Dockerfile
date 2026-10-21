@@ -8,6 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY ton_blocks.py op_names.tsv op_names_registry.tsv ./
+COPY migrations ./migrations
 
 RUN useradd --system --no-create-home ton
 USER ton

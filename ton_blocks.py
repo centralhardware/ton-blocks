@@ -45,20 +45,21 @@ Each flush is a single INSERT, so the summary counts every batch once.
 Running it (in the container the default command is the service):
 
     ton_blocks.py                      ensure the tables, then follow the chain
-    ton_blocks.py --init               only create the tables
-    ton_blocks.py --print-ddl          the CREATE statements
+    ton_blocks.py --init               only apply the migrations
+    ton_blocks.py --print-ddl          the migrations' statements
     ton_blocks.py --from 100400000     start/backfill from that mc seqno
     ton_blocks.py --dry-run --count 3  process 3 mc blocks, print, touch nothing
 
 Configured by environment: CLICKHOUSE_URL, CLICKHOUSE_TON_USER,
-CLICKHOUSE_TON_PASSWORD. The login needs SELECT, INSERT, CREATE TABLE and
-CREATE VIEW on `ton.*`; the `ton` database itself is created by an admin.
+CLICKHOUSE_TON_PASSWORD. The login needs SELECT, INSERT, CREATE TABLE, CREATE
+VIEW, ALTER and DROP TABLE on `ton.*` (the last two for migrations that change
+a table); the `ton` database itself is created by an admin.
 """
 import argparse
 import asyncio
-import datetime
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -84,174 +85,18 @@ TRANSIENT_RETRY_SECONDS = 0.5
 # touched after every mc block; the Docker HEALTHCHECK fails when it goes stale
 HEARTBEAT = Path(os.environ.get("TON_HEARTBEAT_FILE", "/tmp/ton-blocks.heartbeat"))
 
-TX_TTL_DAYS = 90
 # how long an outgoing message is remembered for linking its receiver into the
 # sender's trace, in mc blocks (~30 min); traces practically finish in seconds
 TRACE_KEEP = 3600
-TRACES = True             # off when the login may not add the trace_id column
 
-ACCOUNT_STATE_SELECT = """
-SELECT
-    account,
-    workchain,
-    argMaxState(toString(end_status), lt) AS status,
-    min(now)                          AS first_seen,
-    max(now)                          AS last_seen,
-    toUInt64(count())                 AS txs,
-    toUInt64(countIf(success = 0))    AS failed,
-    sum(value)                        AS received,
-    sum(total_fees)                   AS fees
-FROM {db}.transactions
-GROUP BY account, workchain"""
-
-DDL = [
-    # one slim row per transaction -- what analytics needs, none of the hashes,
-    # block ids or masterchain tick-tock housekeeping; dropped after TX_TTL_DAYS
-    """
-CREATE TABLE IF NOT EXISTS {db}.transactions (
-    now              DateTime('UTC'),
-    mc_seqno         UInt32,
-    workchain        Int8,
-    block_seqno      UInt32,
-    account          String CODEC(ZSTD(3)),
-    lt               UInt64,
-    trace_id         UInt256,
-    in_msg_type      LowCardinality(String),
-    src              String CODEC(ZSTD(3)),
-    value            UInt64,
-    op               Nullable(UInt32),
-    total_fees       UInt64,
-    success          UInt8,
-    exit_code        Nullable(Int32),
-    out_msgs         UInt16,
-    orig_status      LowCardinality(String),
-    end_status       LowCardinality(String)
-)
-ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMMDD(now)
-ORDER BY (account, lt)
-TTL now + INTERVAL {ttl} DAY
-""",
-    # the per-minute summary, kept forever; filled by the view below at insert
-    """
-CREATE TABLE IF NOT EXISTS {db}.minute (
-    minute           DateTime('UTC'),
-    workchain        Int8,
-    blocks           AggregateFunction(uniq, UInt32),
-    txs              SimpleAggregateFunction(sum, UInt64),
-    failed           SimpleAggregateFunction(sum, UInt64),
-    external_in      SimpleAggregateFunction(sum, UInt64),
-    volume           SimpleAggregateFunction(sum, UInt64),
-    fees             SimpleAggregateFunction(sum, UInt64),
-    out_msgs         SimpleAggregateFunction(sum, UInt64),
-    accounts         AggregateFunction(uniq, String),
-    senders          AggregateFunction(uniq, String),
-    created          SimpleAggregateFunction(sum, UInt64),
-    deployed         SimpleAggregateFunction(sum, UInt64),
-    frozen           SimpleAggregateFunction(sum, UInt64),
-    deleted          SimpleAggregateFunction(sum, UInt64)
-)
-ENGINE = AggregatingMergeTree
-PARTITION BY toYYYYMM(minute)
-ORDER BY (workchain, minute)
-""",
-    """
-CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.minute_mv TO {db}.minute AS
-SELECT
-    toStartOfMinute(now)              AS minute,
-    workchain,
-    uniqState(block_seqno)            AS blocks,
-    toUInt64(count())                 AS txs,
-    toUInt64(countIf(success = 0))    AS failed,
-    toUInt64(countIf(in_msg_type = 'externalin')) AS external_in,
-    sum(value)                        AS volume,
-    sum(total_fees)                   AS fees,
-    toUInt64(sum(out_msgs))           AS out_msgs,
-    uniqState(account)                AS accounts,
-    uniqState(src)                    AS senders,
-    -- account lifecycle, from the status before/after each transaction
-    toUInt64(countIf(orig_status = 'nonexist' AND end_status != 'nonexist')) AS created,
-    toUInt64(countIf(orig_status != 'active' AND end_status = 'active'))     AS deployed,
-    toUInt64(countIf(orig_status != 'frozen' AND end_status = 'frozen'))     AS frozen,
-    toUInt64(countIf(orig_status != 'nonexist' AND end_status = 'nonexist')) AS deleted
-FROM {db}.transactions
-GROUP BY minute, workchain
-""",
-    """
-CREATE TABLE IF NOT EXISTS {db}.ops_hour (
-    hour             DateTime('UTC'),
-    workchain        Int8,
-    op               Int64,
-    txs              SimpleAggregateFunction(sum, UInt64),
-    failed           SimpleAggregateFunction(sum, UInt64),
-    volume           SimpleAggregateFunction(sum, UInt64),
-    fees             SimpleAggregateFunction(sum, UInt64)
-)
-ENGINE = AggregatingMergeTree
-PARTITION BY toYYYYMM(hour)
-ORDER BY (workchain, op, hour)
-""",
-    """
-CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.ops_hour_mv TO {db}.ops_hour AS
-SELECT
-    toStartOfHour(now)                AS hour,
-    workchain,
-    ifNull(toInt64(op), -1)           AS op,
-    toUInt64(count())                 AS txs,
-    toUInt64(countIf(success = 0))    AS failed,
-    sum(value)                        AS volume,
-    sum(total_fees)                   AS fees
-FROM {db}.transactions
-GROUP BY hour, workchain, op
-""",
-    # every account ever seen in a transaction, with its latest status; kept
-    # forever (unlike the transactions it is built from). Only accounts that
-    # transacted since the logger started -- not the whole chain's state.
-    """
-CREATE TABLE IF NOT EXISTS {db}.account_state (
-    account          String CODEC(ZSTD(3)),
-    workchain        Int8,
-    status           AggregateFunction(argMax, String, UInt64),
-    first_seen       SimpleAggregateFunction(min, DateTime('UTC')),
-    last_seen        SimpleAggregateFunction(max, DateTime('UTC')),
-    txs              SimpleAggregateFunction(sum, UInt64),
-    failed           SimpleAggregateFunction(sum, UInt64),
-    received         SimpleAggregateFunction(sum, UInt64),
-    fees             SimpleAggregateFunction(sum, UInt64)
-)
-ENGINE = AggregatingMergeTree
--- workchain is implied by the account, but an AggregatingMergeTree refuses a
--- plain column outside the sorting key
-ORDER BY (workchain, account)
-""",
-    """
-CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.account_state_mv TO {db}.account_state AS
-""" + ACCOUNT_STATE_SELECT.format(db="{db}") + """
-""",
-    # the current state, one row per account: status is the end_status of the
-    # account's latest transaction (by lt)
-    """
-CREATE VIEW IF NOT EXISTS {db}.accounts AS
-SELECT
-    account,
-    workchain,
-    argMaxMerge(status)  AS status,
-    min(first_seen)      AS first_seen,
-    max(last_seen)       AS last_seen,
-    sum(txs)             AS txs,
-    sum(failed)          AS failed,
-    sum(received)        AS received,
-    sum(fees)            AS fees
-FROM {db}.account_state
-GROUP BY account, workchain
-""",
-    """
-CREATE VIEW IF NOT EXISTS {db}.account_status_counts AS
-SELECT workchain, status, count() AS accounts
-FROM {db}.accounts
-GROUP BY workchain, status
-""",
-]
+# The schema lives in migrations/NNNN_name.sql, applied in order on every start
+# and recorded in ton.schema_migrations. Statements in a file end with ";" at the
+# end of a line. A file is never edited once deployed: a change is a new file.
+MIGRATIONS = Path(__file__).with_name("migrations")
+# 0001-0006 are the schema as it stood when migrations were introduced
+# (2026-10-21). A database that already has it is marked at that version
+# instead of running them, so 0004 doesn't run against a filled account_state.
+BASELINE = 6
 
 
 # ------------------------------------------------------------------ clickhouse
@@ -287,27 +132,34 @@ def _insert(table, rows):
         _post("INSERT INTO %s.%s FORMAT JSONEachRow" % (DATABASE, table), body=body)
 
 
-def backfill_account_state():
-    """account_state was added after the logger had run for a while: seed it
-    once from the transactions already stored. Runs before following starts,
-    so nothing reaches the view concurrently and no row is counted twice."""
-    if int(_post("SELECT count() FROM %s.account_state FORMAT TSV" % DATABASE).strip()):
-        return
-    _post("INSERT INTO %s.account_state %s" % (DATABASE, ACCOUNT_STATE_SELECT.format(db=DATABASE)))
-    print("account_state seeded from stored transactions", flush=True)
+def migrations():
+    out = []
+    for path in sorted(MIGRATIONS.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+        text = path.read_text(encoding="utf-8")
+        stmts = [x.strip() for x in re.split(r";[ \t]*\n", text)]
+        stmts = [x for x in stmts if re.sub(r"--[^\n]*", "", x).strip()]
+        out.append((int(path.name[:4]), path.name, stmts))
+    return out
 
 
-# Inserts go through a Buffer table, so ClickHouse writes one part to
-# transactions (and to every view behind it) per ~30 s instead of one per
-# flush. Flushes when 30 s pass or 500k rows / 200 MB pile up, whichever first.
-# The buffer lives in ClickHouse memory: a clean server shutdown flushes it,
-# an unclean one loses up to max_time of rows -- run() refetches those via
-# missing_mc_seqnos().
-BUFFER_DDL = """
-CREATE TABLE IF NOT EXISTS {db}.transactions_buffer AS {db}.transactions
-ENGINE = Buffer({db}, transactions, 1, 10, 30, 10000, 500000, 10000000, 200000000)
-"""
-INSERT_TABLE = "transactions"   # switched to transactions_buffer once it exists
+def migrate():
+    """Apply the migrations not yet recorded in schema_migrations, in order."""
+    _post("CREATE TABLE IF NOT EXISTS %s.schema_migrations (version UInt32, name String,"
+          " applied_at DateTime('UTC') DEFAULT now()) ENGINE = MergeTree ORDER BY version" % DATABASE)
+    done = {int(x) for x in _post("SELECT version FROM %s.schema_migrations FORMAT TSV" % DATABASE).split()}
+    todo = migrations()
+    if not done and int(_post("EXISTS TABLE %s.transactions FORMAT TSV" % DATABASE).strip()):
+        base = [(v, n) for v, n, _ in todo if v <= BASELINE]
+        _insert("schema_migrations", [{"version": v, "name": n} for v, n in base])
+        done = {v for v, _ in base}
+        print("existing schema marked at migration %04d" % BASELINE, flush=True)
+    for version, name, stmts in todo:
+        if version in done:
+            continue
+        for stmt in stmts:
+            _post(stmt)
+        _insert("schema_migrations", [{"version": version, "name": name}])
+        print("applied migration %s" % name, flush=True)
 
 
 # op_names.tsv: hand-checked names for the most common ops (wins on overlap,
@@ -315,26 +167,11 @@ INSERT_TABLE = "transactions"   # switched to transactions_buffer once it exists
 # build_op_names.py from ton-blockchain/abis and tonkeeper/tongo.
 OP_NAMES_FILES = [Path(__file__).with_name("op_names.tsv"),
                   Path(__file__).with_name("op_names_registry.tsv")]
-OP_NAMES_DDL = """
-CREATE TABLE IF NOT EXISTS {db}.op_names (
-    op               Int64,
-    name             String,
-    protocol         LowCardinality(String),
-    description      String,
-    source           String,
-    updated_at       DateTime DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY op
-"""
-
-
 def load_op_names():
     """Human names for op codes, from op_names.tsv next to this file (every
     entry carries the source it was looked up in). Re-inserted on every start;
     ReplacingMergeTree keeps the newest row per op, so editing the file and
     redeploying updates the names. op is stored like ops_hour.op: -1 = no body."""
-    _post(OP_NAMES_DDL.format(db=DATABASE))
     rows = []
     for path in OP_NAMES_FILES:
         with path.open(encoding="utf-8") as fh:
@@ -347,36 +184,6 @@ def load_op_names():
                 rows.append(r)
     _insert("op_names", rows)
     print("op_names: %d entries" % len(rows), flush=True)
-
-
-def ensure_trace_column():
-    """trace_id was added after the table existed. The Buffer table can't take an
-    ALTER, so drop it (that flushes it into transactions) and let ensure_buffer()
-    recreate it with the new column. Needs ALTER ADD COLUMN and DROP TABLE on ton.*."""
-    have = _post("SELECT count() FROM system.columns WHERE database = '%s' AND table = 'transactions'"
-                 " AND name = 'trace_id' FORMAT TSV" % DATABASE).strip()
-    global TRACES
-    if int(have):
-        return
-    try:
-        _post("ALTER TABLE %s.transactions ADD COLUMN IF NOT EXISTS trace_id UInt256 AFTER lt" % DATABASE)
-        _post("DROP TABLE IF EXISTS %s.transactions_buffer" % DATABASE)
-    except RuntimeError as e:
-        # without the grants keep logging, just without trace_id
-        TRACES = False
-        print("trace_id not added, logging without it: %s" % str(e)[:300], file=sys.stderr, flush=True)
-        return
-    print("added transactions.trace_id", flush=True)
-
-
-def ensure_buffer():
-    """Create the buffer and route inserts into it; on refusal, insert directly."""
-    global INSERT_TABLE
-    try:
-        _post(BUFFER_DDL.format(db=DATABASE))
-        INSERT_TABLE = "transactions_buffer"
-    except RuntimeError as e:
-        print("buffer table unavailable, inserting directly: %s" % str(e)[:300], file=sys.stderr, flush=True)
 
 
 CONTINUITY_EVERY = 300     # seconds between gap checks
@@ -400,7 +207,7 @@ def missing_mc_seqnos(lo, hi):
 def resume_point():
     """The mc seqno after the last one stored, or None on an empty table."""
     # reading the Buffer table reads the destination plus whatever is still buffered
-    out = _post("SELECT max(mc_seqno), count() FROM %s.%s FORMAT TSV" % (DATABASE, INSERT_TABLE))
+    out = _post("SELECT max(mc_seqno), count() FROM %s.transactions_buffer FORMAT TSV" % DATABASE)
     top, n = out.split()
     return int(top) + 1 if int(n) else None
 
@@ -513,9 +320,8 @@ def tx_row(blk_id, mc_seqno, tx, trace_id=0):
         "out_msgs": tx.outmsg_cnt,
         "orig_status": _status(tx.orig_status),
         "end_status": _status(tx.end_status),
+        "trace_id": str(trace_id),   # UInt256 as a decimal string in JSON
     }
-    if TRACES:
-        row["trace_id"] = str(trace_id)   # UInt256 as a decimal string in JSON
     return row
 
 
@@ -606,7 +412,7 @@ class Follower:
             print("transactions: %d (first: %s)" % (len(self.txs), json.dumps(self.txs[0])), flush=True)
         else:
             # one INSERT per flush, so the minute view sees each batch exactly once
-            _insert(INSERT_TABLE, self.txs)
+            _insert("transactions_buffer", self.txs)
         self.txs = []
         self.last_flush = time.monotonic()
 
@@ -688,18 +494,15 @@ def main():
     args = ap.parse_args()
     if args.print_ddl:
         print("CREATE DATABASE IF NOT EXISTS %s;" % DATABASE)
-        for s in DDL + [BUFFER_DDL, OP_NAMES_DDL]:
-            print(s.format(db=DATABASE, ttl=TX_TTL_DAYS).strip() + ";\n")
+        for _, name, stmts in migrations():
+            print("-- %s" % name)
+            for stmt in stmts:
+                print(stmt + ";\n")
         return
     if args.init or not args.dry_run:
-        # idempotent (IF NOT EXISTS), so the service ensures its schema on every start
-        for s in DDL:
-            _post(s.format(db=DATABASE, ttl=TX_TTL_DAYS))
-        backfill_account_state()
+        migrate()
         load_op_names()
-        ensure_trace_column()
-        ensure_buffer()
-        print("tables ready (inserting into %s)" % INSERT_TABLE, flush=True)
+        print("tables ready", flush=True)
         if args.init:
             return
     asyncio.run(run(args))
