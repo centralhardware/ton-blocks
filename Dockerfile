@@ -20,8 +20,12 @@ RUN curl -fsSL -o fift https://github.com/ton-blockchain/ton/releases/download/$
  && curl -fsSL -o lib.zip https://github.com/ton-blockchain/ton/releases/download/${TON_RELEASE}/smartcont_lib.zip \
  && unzip -q lib.zip 'lib/*' && rm lib.zip
 
-# debian-slim rather than distroless: fift needs glibc and libtinfo
+# debian-slim rather than distroless: fift needs glibc and libtinfo. Unlike
+# distroless it has no CA bundle, and without one every HTTPS call (the ton.org
+# liteserver config, toncenter) fails at start.
 FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=fift /opt/fift /opt/fift
 # fail the build here, not at runtime, if fift can't start
 RUN LD_LIBRARY_PATH=/opt/fift/app/usr/lib /opt/fift/app/usr/bin/fift -V
