@@ -289,6 +289,18 @@ def _status(st):
     return str(getattr(st, "type_", st)).lower()
 
 
+def _msg_type(info):
+    """internal / externalin, or empty for a transaction without an inbound message.
+
+    The value must stay 'externalin': ton.minute_mv counts external messages by
+    it. (Until 2026-10-21 08:47 UTC this wrote 'external', which the view never
+    matched -- minute.external_in is 0 before that.)"""
+    if info is None:
+        return ""
+    name = type(info).__name__
+    return "internal" if name.startswith("Internal") else "externalin"
+
+
 def tx_row(blk_id, mc_seqno, tx):
     d = tx.description
     cph = getattr(d, "compute_ph", None)
@@ -301,8 +313,7 @@ def tx_row(blk_id, mc_seqno, tx):
         "block_seqno": blk_id.seqno,
         "account": "%d:%s" % (blk_id.workchain, tx.account_addr_hex),
         "lt": tx.lt,
-        # internal / externalin; empty for a transaction without an inbound message
-        "in_msg_type": type(info).__name__.replace("MsgInfo", "").lower() if info is not None else "",
+        "in_msg_type": _msg_type(info),
         "src": _addr(getattr(info, "src", None)),
         "value": getattr(info, "value_coins", 0) or 0,
         "op": _op(msg) if msg is not None else None,
