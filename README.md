@@ -7,7 +7,7 @@ It reads blocks from the public liteservers through [pytoniq](https://github.com
 
 | table | content | retention |
 |---|---|---|
-| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, success/exit code, account status before/after. No hashes, no per-block rows, no masterchain tick-tock. | 90 days (TTL) |
+| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, success/exit code, account status before/after, and `trace_id`. No other hashes, no per-block rows, no masterchain tick-tock. | 90 days (TTL) |
 | `minute` | per minute and workchain: blocks, txs, failed, external-in, volume, fees, out messages, unique accounts/senders (`uniqMerge`), accounts created/deployed/frozen/deleted | forever |
 | `ops_hour` | per hour, workchain and op code (`-1` = no body, `0` = text comment): txs, failed, volume, fees | forever |
 | `account_state` | every account seen in a transaction: latest status (argMax by lt), first/last seen, txs, failed, received, fees | forever |
@@ -21,6 +21,20 @@ Materialized views fill `minute`, `ops_hour` and `account_state` on every insert
 
 On mainnet (October 2026) the logger sees about 2 masterchain blocks/s and about 35 tx/s, and it keeps up with no lag.
 
+## Traces
+
+One user action (a swap, an NFT purchase) is one external message that sets off a tree of internal messages, so it spans several transactions, often in different blocks. `trace_id` is the hash of the transaction that started it, as a UInt256. Every transaction in the tree carries the same value. It is the id explorers use:
+
+```sql
+SELECT lower(hex(reverse(reinterpretAsFixedString(trace_id)))) AS trace_hex, count() AS steps
+FROM ton.transactions WHERE trace_id != 0 GROUP BY trace_id ORDER BY steps DESC LIMIT 10
+-- open as https://tonviewer.com/transaction/<trace_hex>
+```
+
+The logger links each incoming internal message to the trace of the transaction that sent it, keeping sent messages in memory for about 30 minutes. `0` means unknown: the sender was processed before the last restart (or is older than that), or the row predates the column (2026-10-21). The column costs about 32 bytes a row, roughly doubling the table, because hashes don't compress.
+
+Adding the column to an existing table needs `GRANT ALTER ADD COLUMN, DROP TABLE ON ton.* TO claude_ton`. `DROP TABLE` is needed because the Buffer table is recreated, and dropping it flushes it first. Without the grant, the logger keeps running without `trace_id`.
+
 ## How it follows the chain
 
 For each masterchain block N, it stores the transactions in N itself. It then takes each shard top of N and walks back through `prev_ref` until it reaches what the shard tops of N-1 already covered. This handles several shard blocks landing between two masterchain blocks, and shard splits and merges.
@@ -32,7 +46,7 @@ After a restart it resumes from `max(mc_seqno) + 1`, so outages get backfilled.
    ```sql
    CREATE DATABASE ton;
    CREATE USER claude_ton IDENTIFIED BY '…';
-   GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW ON ton.* TO claude_ton;
+   GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW, ALTER ADD COLUMN, DROP TABLE ON ton.* TO claude_ton;
    GRANT SELECT ON ton.* TO claude_ro;   -- for Grafana / read-only queries
    ```
 2. In Coolify, create a new resource from **Docker Compose** using `docker-compose.yml` and set `CLICKHOUSE_TON_PASSWORD`. `CLICKHOUSE_URL` and `CLICKHOUSE_TON_USER` have defaults. The service creates its tables on start.

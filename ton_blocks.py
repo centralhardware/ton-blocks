@@ -15,7 +15,12 @@ How one masterchain block is handled:
                          between two mc blocks, and shards split and merge)
 
 Only what analytics needs is kept (the user's call, 2026-10-21): no hashes,
-no per-block rows, no masterchain tick-tock housekeeping.
+no per-block rows, no masterchain tick-tock housekeeping. The one exception is
+`trace_id`: the hash of the transaction that started the trace (the external
+message a user signed), shared by every transaction that message set off, so
+one user action -- a swap, an NFT purchase -- can be grouped. It is the id the
+explorers use: tonviewer.com/transaction/<trace_hex(trace_id)>. 0 = unknown
+(the parent was seen before the last restart, or is older than TRACE_KEEP).
 
     ton.transactions   one slim row per transaction, TTL 90 days
     ton.minute         per-minute, per-workchain summary, kept forever --
@@ -80,6 +85,10 @@ TRANSIENT_RETRY_SECONDS = 0.5
 HEARTBEAT = Path(os.environ.get("TON_HEARTBEAT_FILE", "/tmp/ton-blocks.heartbeat"))
 
 TX_TTL_DAYS = 90
+# how long an outgoing message is remembered for linking its receiver into the
+# sender's trace, in mc blocks (~30 min); traces practically finish in seconds
+TRACE_KEEP = 3600
+TRACES = True             # off when the login may not add the trace_id column
 
 ACCOUNT_STATE_SELECT = """
 SELECT
@@ -106,6 +115,7 @@ CREATE TABLE IF NOT EXISTS {db}.transactions (
     block_seqno      UInt32,
     account          String CODEC(ZSTD(3)),
     lt               UInt64,
+    trace_id         UInt256,
     in_msg_type      LowCardinality(String),
     src              String CODEC(ZSTD(3)),
     value            UInt64,
@@ -339,6 +349,26 @@ def load_op_names():
     print("op_names: %d entries" % len(rows), flush=True)
 
 
+def ensure_trace_column():
+    """trace_id was added after the table existed. The Buffer table can't take an
+    ALTER, so drop it (that flushes it into transactions) and let ensure_buffer()
+    recreate it with the new column. Needs ALTER ADD COLUMN and DROP TABLE on ton.*."""
+    have = _post("SELECT count() FROM system.columns WHERE database = '%s' AND table = 'transactions'"
+                 " AND name = 'trace_id' FORMAT TSV" % DATABASE).strip()
+    global TRACES
+    if int(have):
+        return
+    try:
+        _post("ALTER TABLE %s.transactions ADD COLUMN IF NOT EXISTS trace_id UInt256 AFTER lt" % DATABASE)
+        _post("DROP TABLE IF EXISTS %s.transactions_buffer" % DATABASE)
+    except RuntimeError as e:
+        # without the grants keep logging, just without trace_id
+        TRACES = False
+        print("trace_id not added, logging without it: %s" % str(e)[:300], file=sys.stderr, flush=True)
+        return
+    print("added transactions.trace_id", flush=True)
+
+
 def ensure_buffer():
     """Create the buffer and route inserts into it; on refusal, insert directly."""
     global INSERT_TABLE
@@ -457,12 +487,16 @@ def _msg_type(info):
     return "internal" if name.startswith("Internal") else "externalin"
 
 
-def tx_row(blk_id, mc_seqno, tx):
+def trace_hex(trace_id):
+    return "%064x" % trace_id
+
+
+def tx_row(blk_id, mc_seqno, tx, trace_id=0):
     d = tx.description
     cph = getattr(d, "compute_ph", None)
     msg = tx.in_msg
     info = msg.info if msg is not None else None
-    return {
+    row = {
         "now": tx.now,
         "mc_seqno": mc_seqno,
         "workchain": blk_id.workchain,
@@ -480,6 +514,9 @@ def tx_row(blk_id, mc_seqno, tx):
         "orig_status": _status(tx.orig_status),
         "end_status": _status(tx.end_status),
     }
+    if TRACES:
+        row["trace_id"] = str(trace_id)   # UInt256 as a decimal string in JSON
+    return row
 
 
 class Follower:
@@ -488,6 +525,7 @@ class Follower:
         self.dry_run = dry_run
         self.prev_tops = None      # shard tops of the last processed mc block
         self.txs = []
+        self.traces = {}           # out message hash -> (trace_id, mc seqno)
         self.last_flush = time.monotonic()
 
     async def connect(self):
@@ -502,13 +540,34 @@ class Follower:
     async def mc_id(self, seqno):
         return (await self.client.lookup_block(-1, MC_SHARD, seqno))[0]
 
-    async def one_block(self, blk_id, mc_seqno, rows):
-        """Collect one block's transactions into rows; returns its header info (for the prev walk)."""
+    async def one_block(self, blk_id, txs):
+        """Collect one block's (block id, transaction) pairs; returns its header info (for the prev walk)."""
         hdr = await self.client.raw_get_block_header(blk_id)
-        txs = await self.client.raw_get_block_transactions_ext(blk_id)
-        rows.extend(tx_row(blk_id, mc_seqno, t) for t in txs
-                    if getattr(t.description, "type_", "") != "tick_tock")
+        txs.extend((blk_id, t) for t in await self.client.raw_get_block_transactions_ext(blk_id))
         return hdr.info
+
+    def trace_rows(self, mc_seqno, txs):
+        """Rows for one mc block's transactions, each tagged with its trace.
+        A child's lt is always above its parent's, so in lt order every parent
+        in this mc block is linked before its children; parents from earlier mc
+        blocks come from self.traces. Tick-tock transactions are linked (their
+        messages start traces too) but not stored."""
+        rows = []
+        for blk_id, t in sorted(txs, key=lambda x: x[1].lt):
+            msg = t.in_msg
+            if msg is None or _msg_type(msg.info) == "externalin":
+                trace = int.from_bytes(t.cell.hash, "big")
+            else:
+                trace = self.traces.pop(msg.serialize().hash, (0, 0))[0]
+            for out in t.out_msgs:
+                if _msg_type(out.info) == "internal":
+                    self.traces[out.serialize().hash] = (trace, mc_seqno)
+            if getattr(t.description, "type_", "") != "tick_tock":
+                rows.append(tx_row(blk_id, mc_seqno, t, trace))
+        if mc_seqno % 100 == 0:
+            old = mc_seqno - TRACE_KEEP
+            self.traces = {h: v for h, v in self.traces.items() if v[1] >= old}
+        return rows
 
     def _covered(self, blk_id, prev_tops):
         return any(t.workchain == blk_id.workchain and _overlaps(t.shard, blk_id.shard)
@@ -518,9 +577,9 @@ class Follower:
         # rows reach the buffer only once the whole mc block succeeded: a retry
         # after a half-done block must not insert its first blocks twice (the
         # table would dedupe them on merge, the summary views would not)
-        rows = []
+        txs = []
         mc = await self.mc_id(seqno)
-        await self.one_block(mc, seqno, rows)
+        await self.one_block(mc, txs)
         tops = await self.client.get_all_shards_info(mc)
         prev_tops = self.prev_tops
         if prev_tops is None:
@@ -533,9 +592,9 @@ class Follower:
             if key in seen or self._covered(b, prev_tops):
                 continue
             seen.add(key)
-            info = await self.one_block(b, seqno, rows)
+            info = await self.one_block(b, txs)
             queue.extend(prev_ids(b, info))
-        self.txs.extend(rows)
+        self.txs.extend(self.trace_rows(seqno, txs))
         self.prev_tops = tops
         return len(seen) + 1
 
@@ -638,6 +697,7 @@ def main():
             _post(s.format(db=DATABASE, ttl=TX_TTL_DAYS))
         backfill_account_state()
         load_op_names()
+        ensure_trace_column()
         ensure_buffer()
         print("tables ready (inserting into %s)" % INSERT_TABLE, flush=True)
         if args.init:
