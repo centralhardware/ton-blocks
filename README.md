@@ -18,6 +18,7 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `contracts` | account → status, code hash and the interfaces toncenter recognises in that code (`wallet_v5r1`, `jetton_wallet`, `tg_wallet`, …) | — |
 | `code` | the code itself, once per distinct code hash: base64 BOC (bytecode), size, an example account | — |
 | `block_log` | one row per masterchain and shard block: time, transactions, producing validator (`created_by`), key block, split/merge flags, catchain seqno, node version | 90 days (TTL) |
+| `swaps` | DEX swaps (DeDust, STON.fi v1/v2): pool, user, token and amount in, token and amount out, trace | 90 days (TTL) |
 | `op_names` | name, protocol, description and source for known op codes, loaded from `op_names.tsv` on every start | — |
 
 The logger writes through a **Buffer** table, `transactions_buffer`. ClickHouse flushes it to `transactions` every 10–30 s, so `transactions` and the views behind it get about 2 parts a minute instead of one per insert. The buffer lives in ClickHouse's memory. A clean server shutdown flushes it, but a crash loses up to 30 s of rows. Every 5 minutes the logger checks the last ~25 minutes for masterchain blocks with no rows and fetches them again. If the server refuses the Buffer table, the logger inserts into `transactions` directly.
@@ -67,6 +68,9 @@ SELECT if(empty(c.interfaces), 'unknown code', c.interfaces[1]) AS type, count()
 FROM ton.transactions t JOIN ton.contracts c FINAL ON c.account = t.account
 WHERE t.now > now() - 3600 GROUP BY type ORDER BY txs DESC
 ```
+## Swaps
+
+`swaps.go` decodes swaps from the pool's own transaction: DeDust pools emit an external SwapEvent with both jetton masters and amounts; STON.fi v1/v2 pools receive a `swap` with the input amount and send `pay_to` with the output. STON.fi names tokens by the router's jetton wallet, so resolve a token with `coalesce(nullIf(jetton_wallets.jetton, ''), token)`; `''` is native TON (DeDust). Refunds are not swaps and are skipped.
 
 ## How it follows the chain
 

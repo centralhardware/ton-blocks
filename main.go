@@ -585,6 +585,7 @@ type follower struct {
 	traces   map[string]traced // out message hash -> its trace
 	lastSave time.Time
 	blocks   []blockRow // flushed every blocksEvery: a few rows a second only
+	swaps    []swapRow  // likewise
 	blocksAt time.Time
 	mcSeqno  uint32 // the mc block being processed
 }
@@ -685,6 +686,11 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 		}
 		if !isTickTock(t) {
 			rows = append(rows, txRow(bt.blk, mcSeqno, t, trace))
+			if sw := swapOf(t); sw != nil {
+				sw.Now, sw.McSeqno, sw.TraceID = t.Now, mcSeqno, trace.String()
+				sw.Pool = fmt.Sprintf("%d:%x", bt.blk.Workchain, t.AccountAddr)
+				f.swaps = append(f.swaps, *sw)
+			}
 		}
 	}
 	if mcSeqno%100 == 0 {
@@ -704,10 +710,10 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error) {
 	var txs []blockTx
 	f.mcSeqno = seqno
-	nBlocks := len(f.blocks)
+	nBlocks, nSwaps := len(f.blocks), len(f.swaps)
 	defer func() {
 		if err != nil { // the mc block is retried whole; drop its partial block rows
-			f.blocks = f.blocks[:nBlocks]
+			f.blocks, f.swaps = f.blocks[:nBlocks], f.swaps[:nSwaps]
 		}
 	}()
 	mc, err := f.mcID(ctx, seqno)
@@ -764,7 +770,15 @@ func (f *follower) flush(force bool) error {
 		} else if err := insert("block_log", f.blocks); err != nil {
 			return err
 		}
-		f.blocks = nil
+		if !f.dryRun {
+			if err := insert("swaps", f.swaps); err != nil {
+				return err
+			}
+		} else if len(f.swaps) > 0 {
+			first, _ := json.Marshal(f.swaps[0])
+			log.Printf("swaps: %d (first: %s)", len(f.swaps), first)
+		}
+		f.blocks, f.swaps = nil, nil
 		f.blocksAt = time.Now()
 	}
 	due := force || len(f.rows) >= flushRows || time.Since(f.lastSave) >= flushEvery
