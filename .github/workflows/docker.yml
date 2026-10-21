@@ -18,10 +18,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Smoke test (parse a few live blocks, no ClickHouse)
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and smoke test (parse a few live blocks, no ClickHouse)
         run: |
-          pip install -r requirements.txt
-          timeout 120 python ton_blocks.py --dry-run --count 3
+          go vet ./...
+          go run . -print-ddl > /dev/null
+          timeout 120 go run . -dry-run -count 3
 
       - name: Compute image name and tags
         if: github.event_name != 'pull_request'

@@ -1,7 +1,7 @@
 # ton-blocks
 
 Logs every new TON mainnet block's transactions into ClickHouse for analytics.
-It reads blocks from the public liteservers through [pytoniq](https://github.com/yungwine/pytoniq), so you don't need to run your own node.
+It's written in Go and reads blocks from the public liteservers through [tonutils-go](https://github.com/xssnick/tonutils-go), so you don't need to run your own node. The migrations and op name files are embedded in the binary.
 
 ## What it stores (database `ton`)
 
@@ -19,11 +19,11 @@ The logger writes through a **Buffer** table, `transactions_buffer`. ClickHouse 
 
 Materialized views fill `minute`, `ops_hour` and `account_state` on every insert into `transactions`. `account_state` covers only the accounts that have transacted since the logger started, not the whole chain. When it's first created, it's seeded from the transactions already stored.
 
-On mainnet (October 2026) the logger sees about 2 masterchain blocks/s and about 35 tx/s, and it keeps up with no lag.
+On mainnet (October 2026) the logger sees about 2 masterchain blocks/s and about 35 tx/s, and it keeps up with no lag. Catching up after an outage, it processes about 12 masterchain blocks/s (measured: 100 blocks in 8.5 s).
 
 ## Schema and migrations
 
-The schema lives in `migrations/NNNN_name.sql`. On every start, the logger applies the files not yet recorded in `ton.schema_migrations`, in order, and records each one. To change the schema, add a new numbered file; never edit one that's already deployed. Statements in a file end with `;` at the end of a line. `python ton_blocks.py --print-ddl` prints them all.
+The schema lives in `migrations/NNNN_name.sql`. On every start, the logger applies the files not yet recorded in `ton.schema_migrations`, in order, and records each one. To change the schema, add a new numbered file; never edit one that's already deployed. Statements in a file end with `;` at the end of a line. `go run . -print-ddl` prints them all.
 
 A Buffer table can't be ALTERed. A migration that changes `transactions`' columns should `DROP TABLE ton.transactions_buffer` (dropping flushes it), `ALTER TABLE ton.transactions …`, then recreate the buffer as in `0005`.
 
@@ -64,7 +64,7 @@ The container reports unhealthy if it hasn't processed a masterchain block for 3
 ## Local
 
 ```sh
-pip install -r requirements.txt
-python ton_blocks.py --dry-run --count 3     # parse live blocks, write nothing
-python ton_blocks.py --print-ddl
+go run . -dry-run -count 3     # parse live blocks, write nothing
+go run . -print-ddl
+go run . -from 100400000       # backfill from that mc seqno
 ```
