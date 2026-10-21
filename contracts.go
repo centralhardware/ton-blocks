@@ -157,10 +157,8 @@ func resolveContracts() {
 		if err != nil {
 			log.Printf("code lookup: %v", err)
 		}
-		if fiftAvailable() {
-			if err := disassembleNewCode(); err != nil {
-				log.Printf("disassembly: %v", err)
-			}
+		if err := disassembleNewCode(); err != nil {
+			log.Printf("disassembly: %v", err)
 		}
 		time.Sleep(contractEvery)
 	}

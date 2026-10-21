@@ -16,13 +16,19 @@ import (
 
 // TVM assembly for ton.code, from the official fift disassembler. The image
 // carries fift (extracted from the release AppImage: no FUSE in a container)
-// and its lib/ under FIFT_DIR; without it the step is skipped.
+// and its lib/ under FIFT_DIR; without it the step logs once and is skipped.
 const asmBatch = 100 // codes disassembled per round
 
 var fiftDir = envOr("FIFT_DIR", "/opt/fift")
 
+var fiftWarned bool
+
 func fiftAvailable() bool {
 	_, err := os.Stat(filepath.Join(fiftDir, "app", "usr", "bin", "fift"))
+	if err != nil && !fiftWarned {
+		fiftWarned = true
+		log.Printf("disassembly off: %v", err)
+	}
 	return err == nil
 }
 
@@ -59,6 +65,9 @@ func disassemble(bocB64 string) (string, error) {
 
 // disassembleNewCode fills asm for codes stored without it, one INSERT per round.
 func disassembleNewCode() error {
+	if !fiftAvailable() {
+		return nil
+	}
 	out, err := post(fmt.Sprintf("SELECT code_hash, code_boc, size, example FROM %s.code FINAL "+
 		"WHERE asm = '' AND asm_error = '' LIMIT %d FORMAT JSONEachRow", database, asmBatch), nil)
 	if err != nil {
