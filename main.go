@@ -33,7 +33,8 @@
 //	ton-blocks -healthcheck         exit 1 when the heartbeat is stale (Docker)
 //
 // Configured by environment: CLICKHOUSE_URL, CLICKHOUSE_TON_USER,
-// CLICKHOUSE_TON_PASSWORD. The login needs SELECT, INSERT, CREATE TABLE, CREATE
+// CLICKHOUSE_TON_PASSWORD, and optionally TONCENTER_API_KEY (jetton lookups,
+// see jettons.go). The login needs SELECT, INSERT, CREATE TABLE, CREATE
 // VIEW, ALTER and DROP TABLE on `ton.*` (the last two for migrations that change
 // a table); the `ton` database itself is created by an admin.
 package main
@@ -823,6 +824,7 @@ func main() {
 		if *initOnly {
 			return
 		}
+		go resolveJettons()
 	}
 	if err := run(context.Background(), uint32(*from), *count, *dryRun, *verbose); err != nil {
 		log.Fatal(err)

@@ -13,6 +13,8 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `account_state` | every account seen in a transaction: latest status (argMax by lt), first/last seen, txs, failed, received, fees | forever |
 | `accounts` (view) | one row per account over `account_state`, the current state | — |
 | `account_status_counts` (view) | accounts per workchain and status | — |
+| `jetton_wallets` | token wallet → its token (`jetton` master) and owner, resolved through toncenter; `''` = unknown | — |
+| `jettons` | token master → symbol, name, decimals, image | — |
 | `op_names` | name, protocol, description and source for known op codes, loaded from `op_names.tsv` on every start | — |
 
 The logger writes through a **Buffer** table, `transactions_buffer`. ClickHouse flushes it to `transactions` every 10–30 s, so `transactions` and the views behind it get about 2 parts a minute instead of one per insert. The buffer lives in ClickHouse's memory. A clean server shutdown flushes it, but a crash loses up to 30 s of rows. Every 5 minutes the logger checks the last ~25 minutes for masterchain blocks with no rows and fetches them again. If the server refuses the Buffer table, the logger inserts into `transactions` directly.
@@ -41,6 +43,18 @@ FROM ton.transactions WHERE trace_id != 0 GROUP BY trace_id ORDER BY steps DESC 
 
 The logger links each incoming internal message to the trace of the transaction that sent it, keeping sent messages in memory for about 30 minutes. `0` means unknown: the sender was processed before the last restart (or is older than that), or the row predates the column (2026-10-21). The column costs about 32 bytes a row, roughly doubling the table, because hashes don't compress.
 
+## Tokens
+
+A jetton transfer only names the token *wallet* involved, not the token. Which token a wallet belongs to is chain state, so a background loop in the logger asks toncenter's index (`/api/v3/jetton/wallets`, 100 addresses a request, 1 request/s without a key, or set `TONCENTER_API_KEY`) about every wallet that received a transfer, internal_transfer or burn in the last 7 days and isn't resolved yet. Wallets toncenter doesn't know are asked again after 6 hours. The follower never waits on it.
+
+```sql
+SELECT j.symbol, count() AS transfers
+FROM ton.transactions t
+JOIN ton.jetton_wallets w FINAL ON w.wallet = t.account
+JOIN ton.jettons j FINAL ON j.jetton = w.jetton
+WHERE t.op = 0x178d4519 AND t.now > now() - 86400   -- internal_transfer: one per transfer
+GROUP BY j.symbol ORDER BY transfers DESC LIMIT 20
+```
 
 ## How it follows the chain
 
