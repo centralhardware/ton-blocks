@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 # migrations and the op name files are embedded into the binary
-COPY main.go jettons.go op_names.tsv op_names_registry.tsv ./
+COPY *.go op_names.tsv op_names_registry.tsv ./
 COPY migrations ./migrations
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /ton-blocks .
 

@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,12 +15,10 @@ import (
 // toncenter's index for the wallets seen in recent jetton ops and stores the
 // mapping in ton.jetton_wallets, plus each master's name in ton.jettons.
 const (
-	toncenterURL   = "https://toncenter.com/api/v3/jetton/wallets"
 	jettonBatch    = 100
 	jettonEvery    = time.Minute
-	jettonPause    = 1100 * time.Millisecond // toncenter allows 1 request/s without a key
-	jettonLookback = 7 * 24 * 3600           // seconds of transactions to look for new wallets in
-	jettonRetry    = 6 * 3600                // seconds before asking about an unknown wallet again
+	jettonLookback = 7 * 24 * 3600 // seconds of transactions to look for new wallets in
+	jettonRetry    = 6 * 3600      // seconds before asking about an unknown wallet again
 )
 
 // ops received by a jetton wallet: transfer, internal_transfer, burn
@@ -58,23 +54,7 @@ func unresolvedWallets() ([]string, error) {
 }
 
 func lookupJettons(wallets []string) ([]jettonWallet, []jetton, error) {
-	q := url.Values{"limit": {strconv.Itoa(len(wallets))}}
-	for _, w := range wallets {
-		q.Add("address", w)
-	}
-	req, _ := http.NewRequest("GET", toncenterURL+"?"+q.Encode(), nil)
-	if key := os.Getenv("TONCENTER_API_KEY"); key != "" {
-		req.Header.Set("X-API-Key", key)
-	}
-	client := http.Client{Timeout: httpTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("toncenter %d", resp.StatusCode)
-	}
+	q := url.Values{"limit": {strconv.Itoa(len(wallets))}, "address": wallets}
 	var body struct {
 		JettonWallets []struct {
 			Address, Owner, Jetton string
@@ -88,7 +68,7 @@ func lookupJettons(wallets []string) ([]jettonWallet, []jetton, error) {
 			} `json:"token_info"`
 		} `json:"metadata"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := toncenterGet("jetton/wallets", q, &body); err != nil {
 		return nil, nil, err
 	}
 	found := map[string]jettonWallet{}
@@ -152,7 +132,6 @@ func resolveJettons() {
 			if len(wallets) < jettonBatch {
 				break
 			}
-			time.Sleep(jettonPause)
 		}
 		if total >= 1000 {
 			log.Printf("jetton lookup: %d wallets", total)

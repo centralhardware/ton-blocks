@@ -825,6 +825,7 @@ func main() {
 			return
 		}
 		go resolveJettons()
+		go resolveContracts()
 	}
 	if err := run(context.Background(), uint32(*from), *count, *dryRun, *verbose); err != nil {
 		log.Fatal(err)
