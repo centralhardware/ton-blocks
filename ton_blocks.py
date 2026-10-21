@@ -68,7 +68,7 @@ from pytoniq_core.tl import BlockIdExt
 DATABASE = "ton"
 MC_SHARD = -2 ** 63
 TIMEOUT = 60
-FLUSH_SECONDS = 10
+FLUSH_SECONDS = 2
 FLUSH_ROWS = 20000
 POLL_SECONDS = 1.0
 # stay this many mc blocks behind the head: the public liteservers sit a few
@@ -287,9 +287,51 @@ def backfill_account_state():
     print("account_state seeded from stored transactions", flush=True)
 
 
+# Inserts go through a Buffer table, so ClickHouse writes one part to
+# transactions (and to every view behind it) per ~30 s instead of one per
+# flush. Flushes when 30 s pass or 500k rows / 200 MB pile up, whichever first.
+# The buffer lives in ClickHouse memory: a clean server shutdown flushes it,
+# an unclean one loses up to max_time of rows -- run() refetches those via
+# missing_mc_seqnos().
+BUFFER_DDL = """
+CREATE TABLE IF NOT EXISTS {db}.transactions_buffer AS {db}.transactions
+ENGINE = Buffer({db}, transactions, 1, 10, 30, 10000, 500000, 10000000, 200000000)
+"""
+INSERT_TABLE = "transactions"   # switched to transactions_buffer once it exists
+
+
+def ensure_buffer():
+    """Create the buffer and route inserts into it; on refusal, insert directly."""
+    global INSERT_TABLE
+    try:
+        _post(BUFFER_DDL.format(db=DATABASE))
+        INSERT_TABLE = "transactions_buffer"
+    except RuntimeError as e:
+        print("buffer table unavailable, inserting directly: %s" % str(e)[:300], file=sys.stderr, flush=True)
+
+
+CONTINUITY_EVERY = 300     # seconds between gap checks
+CONTINUITY_SETTLE = 200    # mc blocks (~100 s) younger than this may still sit in the buffer
+CONTINUITY_WINDOW = 3000   # how far back each check looks (~25 min)
+
+
+def missing_mc_seqnos(lo, hi):
+    """mc seqnos in [lo, hi) with no row in the destination table. Every mc
+    block carries at least one non-tick-tock transaction (the fee-minting
+    message from -1:000..), so an absent seqno is a lost one, not an empty one."""
+    if hi <= lo:
+        return []
+    out = _post(
+        "SELECT number FROM numbers({lo}, {n}) WHERE number NOT IN "
+        "(SELECT DISTINCT mc_seqno FROM {db}.transactions WHERE mc_seqno >= {lo} AND mc_seqno < {hi}) "
+        "ORDER BY number FORMAT TSV".format(db=DATABASE, lo=lo, hi=hi, n=hi - lo))
+    return [int(x) for x in out.split()]
+
+
 def resume_point():
     """The mc seqno after the last one stored, or None on an empty table."""
-    out = _post("SELECT max(mc_seqno), count() FROM %s.transactions FORMAT TSV" % DATABASE)
+    # reading the Buffer table reads the destination plus whatever is still buffered
+    out = _post("SELECT max(mc_seqno), count() FROM %s.%s FORMAT TSV" % (DATABASE, INSERT_TABLE))
     top, n = out.split()
     return int(top) + 1 if int(n) else None
 
@@ -466,7 +508,7 @@ class Follower:
             print("transactions: %d (first: %s)" % (len(self.txs), json.dumps(self.txs[0])), flush=True)
         else:
             # one INSERT per flush, so the minute view sees each batch exactly once
-            _insert("transactions", self.txs)
+            _insert(INSERT_TABLE, self.txs)
         self.txs = []
         self.last_flush = time.monotonic()
 
@@ -481,6 +523,7 @@ async def run(args):
         nxt = f.client.last_mc_block.seqno
     print("following from mc seqno %d" % nxt, flush=True)
     done, failures, transient, last_note = 0, 0, 0, time.monotonic()
+    first, last_check = nxt, time.monotonic()
     while args.count is None or done < args.count:
         try:
             head = (await f.client.get_masterchain_info())["last"]["seqno"]
@@ -496,6 +539,18 @@ async def run(args):
             HEARTBEAT.touch()
             failures = 0
             f.flush()
+            if not args.dry_run and time.monotonic() - last_check >= CONTINUITY_EVERY:
+                # rows a ClickHouse crash dropped from the buffer: fetch those mc blocks again
+                last_check = time.monotonic()
+                lost = missing_mc_seqnos(max(first, nxt - CONTINUITY_WINDOW), nxt - CONTINUITY_SETTLE)
+                if lost:
+                    print("refetching %d lost mc blocks (%d..%d)" % (len(lost), lost[0], lost[-1]), flush=True)
+                    f.flush(force=True)
+                    for seq in lost:
+                        f.prev_tops = None
+                        await f.process(seq)
+                    f.prev_tops = None
+                    f.flush(force=True)
         except Exception as e:
             if isinstance(e, LiteServerError) and e.code == 651:
                 # a liteserver behind the others: just ask again (the balancer
@@ -535,7 +590,7 @@ def main():
     args = ap.parse_args()
     if args.print_ddl:
         print("CREATE DATABASE IF NOT EXISTS %s;" % DATABASE)
-        for s in DDL:
+        for s in DDL + [BUFFER_DDL]:
             print(s.format(db=DATABASE, ttl=TX_TTL_DAYS).strip() + ";\n")
         return
     if args.init or not args.dry_run:
@@ -543,7 +598,8 @@ def main():
         for s in DDL:
             _post(s.format(db=DATABASE, ttl=TX_TTL_DAYS))
         backfill_account_state()
-        print("tables ready", flush=True)
+        ensure_buffer()
+        print("tables ready (inserting into %s)" % INSERT_TABLE, flush=True)
         if args.init:
             return
     asyncio.run(run(args))
