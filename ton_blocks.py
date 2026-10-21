@@ -28,6 +28,10 @@ no per-block rows, no masterchain tick-tock housekeeping.
                        (-1 = no body, 0 = text comment), kept forever --
                        hourly, because a single minute already sees ~350
                        distinct op codes, most of them a one-off long tail
+    ton.account_state  every account seen, latest status (argMax by lt),
+                       first/last seen, txs, received, fees -- forever
+    ton.accounts       view: one row per account over account_state
+    ton.account_status_counts  view: accounts per workchain and status
 
 Every row carries the `mc_seqno` it arrived with, and a restart resumes from
 `max(mc_seqno) + 1`, so an outage backfills the gap instead of skipping it.
@@ -76,6 +80,20 @@ TRANSIENT_RETRY_SECONDS = 0.5
 HEARTBEAT = Path(os.environ.get("TON_HEARTBEAT_FILE", "/tmp/ton-blocks.heartbeat"))
 
 TX_TTL_DAYS = 90
+
+ACCOUNT_STATE_SELECT = """
+SELECT
+    account,
+    workchain,
+    argMaxState(toString(end_status), lt) AS status,
+    min(now)                          AS first_seen,
+    max(now)                          AS last_seen,
+    toUInt64(count())                 AS txs,
+    toUInt64(countIf(success = 0))    AS failed,
+    sum(value)                        AS received,
+    sum(total_fees)                   AS fees
+FROM {db}.transactions
+GROUP BY account, workchain"""
 
 DDL = [
     # one slim row per transaction -- what analytics needs, none of the hashes,
@@ -176,6 +194,51 @@ SELECT
 FROM {db}.transactions
 GROUP BY hour, workchain, op
 """,
+    # every account ever seen in a transaction, with its latest status; kept
+    # forever (unlike the transactions it is built from). Only accounts that
+    # transacted since the logger started -- not the whole chain's state.
+    """
+CREATE TABLE IF NOT EXISTS {db}.account_state (
+    account          String CODEC(ZSTD(3)),
+    workchain        Int8,
+    status           AggregateFunction(argMax, String, UInt64),
+    first_seen       SimpleAggregateFunction(min, DateTime('UTC')),
+    last_seen        SimpleAggregateFunction(max, DateTime('UTC')),
+    txs              SimpleAggregateFunction(sum, UInt64),
+    failed           SimpleAggregateFunction(sum, UInt64),
+    received         SimpleAggregateFunction(sum, UInt64),
+    fees             SimpleAggregateFunction(sum, UInt64)
+)
+ENGINE = AggregatingMergeTree
+ORDER BY account
+""",
+    """
+CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.account_state_mv TO {db}.account_state AS
+""" + ACCOUNT_STATE_SELECT.format(db="{db}") + """
+""",
+    # the current state, one row per account: status is the end_status of the
+    # account's latest transaction (by lt)
+    """
+CREATE VIEW IF NOT EXISTS {db}.accounts AS
+SELECT
+    account,
+    workchain,
+    argMaxMerge(status)  AS status,
+    min(first_seen)      AS first_seen,
+    max(last_seen)       AS last_seen,
+    sum(txs)             AS txs,
+    sum(failed)          AS failed,
+    sum(received)        AS received,
+    sum(fees)            AS fees
+FROM {db}.account_state
+GROUP BY account, workchain
+""",
+    """
+CREATE VIEW IF NOT EXISTS {db}.account_status_counts AS
+SELECT workchain, status, count() AS accounts
+FROM {db}.accounts
+GROUP BY workchain, status
+""",
 ]
 
 
@@ -210,6 +273,16 @@ def _insert(table, rows):
     if rows:
         body = "".join(json.dumps(r) + "\n" for r in rows)
         _post("INSERT INTO %s.%s FORMAT JSONEachRow" % (DATABASE, table), body=body)
+
+
+def backfill_account_state():
+    """account_state was added after the logger had run for a while: seed it
+    once from the transactions already stored. Runs before following starts,
+    so nothing reaches the view concurrently and no row is counted twice."""
+    if int(_post("SELECT count() FROM %s.account_state FORMAT TSV" % DATABASE).strip()):
+        return
+    _post("INSERT INTO %s.account_state %s" % (DATABASE, ACCOUNT_STATE_SELECT.format(db=DATABASE)))
+    print("account_state seeded from stored transactions", flush=True)
 
 
 def resume_point():
@@ -467,6 +540,7 @@ def main():
         # idempotent (IF NOT EXISTS), so the service ensures its schema on every start
         for s in DDL:
             _post(s.format(db=DATABASE, ttl=TX_TTL_DAYS))
+        backfill_account_state()
         print("tables ready", flush=True)
         if args.init:
             return

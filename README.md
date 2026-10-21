@@ -11,7 +11,11 @@ It reads blocks from the public liteservers through [pytoniq](https://github.com
 | `minute` | per minute and workchain: blocks, txs, failed, external-in, volume, fees, out messages, unique accounts/senders (`uniqMerge`), accounts created/deployed/frozen/deleted | forever |
 | `ops_hour` | per hour, workchain and op code (`-1` = no body, `0` = text comment): txs, failed, volume, fees | forever |
 
-A materialized view fills `minute` and `ops_hour` on every insert into `transactions`.
+| `account_state` | every account seen in a transaction: latest status (argMax by lt), first/last seen, txs, failed, received, fees | forever |
+| `accounts` (view) | one row per account over `account_state`, the current state | — |
+| `account_status_counts` (view) | accounts per workchain and status | — |
+
+Materialized views fill `minute`, `ops_hour` and `account_state` on every insert into `transactions`. `account_state` covers only the accounts that have transacted since the logger started, not the whole chain. When it's first created, it's seeded from the transactions already stored.
 
 On mainnet (October 2026) the logger sees about 2 masterchain blocks/s and about 35 tx/s, and it keeps up with no lag.
 
