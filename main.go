@@ -61,6 +61,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
@@ -351,6 +352,8 @@ type row struct {
 	Src        string  `json:"src"`
 	Value      uint64  `json:"value"`
 	Op         *uint32 `json:"op"`
+	JettonAmt  *string `json:"jetton_amount"` // UInt128 as a decimal string
+	JettonPeer string  `json:"jetton_peer"`
 	TotalFees  uint64  `json:"total_fees"`
 	Success    uint8   `json:"success"`
 	ExitCode   *int32  `json:"exit_code"`
@@ -381,6 +384,42 @@ func msgType(m *tlb.Message) string {
 }
 
 // opOf is the 32-bit op code at the head of the body (0 = text comment), or nil.
+// jettonAmount reads the token amount (and the other party's address) from a
+// jetton transfer / internal_transfer / transfer_notification / burn body; nil
+// for anything else or a body that doesn't parse.
+func jettonAmount(m *tlb.Message) (*string, string) {
+	body := m.Msg.Payload()
+	if body == nil {
+		return nil, ""
+	}
+	s, err := body.BeginParse()
+	if err != nil || s.BitsLeft() < 96 {
+		return nil, ""
+	}
+	op, _ := s.LoadUInt(32)
+	switch op {
+	case 0x0f8a7ea5, 0x178d4519, 0x7362d09c, 0x595f07bc:
+	default:
+		return nil, ""
+	}
+	if _, err := s.LoadUInt(64); err != nil { // query_id
+		return nil, ""
+	}
+	amt, err := s.LoadVarUInt(16)
+	if err != nil {
+		return nil, ""
+	}
+	v := amt.String()
+	if op == 0x595f07bc {
+		return &v, ""
+	}
+	peer := ""
+	if a, err := s.LoadAddr(); err == nil && a != nil && a.Type() == address.StdAddress {
+		peer = a.StringRaw()
+	}
+	return &v, peer
+}
+
 func opOf(m *tlb.Message) *uint32 {
 	var body = m.Msg.Payload()
 	if body == nil {
@@ -481,6 +520,7 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 	}
 	if in := tx.IO.In; in != nil {
 		r.Op = opOf(in)
+		r.JettonAmt, r.JettonPeer = jettonAmount(in)
 		if in.MsgType == tlb.MsgTypeInternal {
 			m := in.AsInternal()
 			r.Src = m.SrcAddr.StringRaw()
