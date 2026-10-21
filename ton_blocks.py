@@ -300,6 +300,40 @@ ENGINE = Buffer({db}, transactions, 1, 10, 30, 10000, 500000, 10000000, 20000000
 INSERT_TABLE = "transactions"   # switched to transactions_buffer once it exists
 
 
+OP_NAMES_FILE = Path(__file__).with_name("op_names.tsv")
+OP_NAMES_DDL = """
+CREATE TABLE IF NOT EXISTS {db}.op_names (
+    op               Int64,
+    name             String,
+    protocol         LowCardinality(String),
+    description      String,
+    source           String,
+    updated_at       DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY op
+"""
+
+
+def load_op_names():
+    """Human names for op codes, from op_names.tsv next to this file (every
+    entry carries the source it was looked up in). Re-inserted on every start;
+    ReplacingMergeTree keeps the newest row per op, so editing the file and
+    redeploying updates the names. op is stored like ops_hour.op: -1 = no body."""
+    _post(OP_NAMES_DDL.format(db=DATABASE))
+    rows = []
+    with OP_NAMES_FILE.open(encoding="utf-8") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        for line in fh:
+            if not line.strip():
+                continue
+            r = dict(zip(header, line.rstrip("\n").split("\t")))
+            r["op"] = int(r["op"], 0)
+            rows.append(r)
+    _insert("op_names", rows)
+    print("op_names: %d entries" % len(rows), flush=True)
+
+
 def ensure_buffer():
     """Create the buffer and route inserts into it; on refusal, insert directly."""
     global INSERT_TABLE
@@ -590,7 +624,7 @@ def main():
     args = ap.parse_args()
     if args.print_ddl:
         print("CREATE DATABASE IF NOT EXISTS %s;" % DATABASE)
-        for s in DDL + [BUFFER_DDL]:
+        for s in DDL + [BUFFER_DDL, OP_NAMES_DDL]:
             print(s.format(db=DATABASE, ttl=TX_TTL_DAYS).strip() + ";\n")
         return
     if args.init or not args.dry_run:
@@ -598,6 +632,7 @@ def main():
         for s in DDL:
             _post(s.format(db=DATABASE, ttl=TX_TTL_DAYS))
         backfill_account_state()
+        load_op_names()
         ensure_buffer()
         print("tables ready (inserting into %s)" % INSERT_TABLE, flush=True)
         if args.init:

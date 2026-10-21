@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-COPY ton_blocks.py .
+COPY ton_blocks.py op_names.tsv ./
 
 RUN useradd --system --no-create-home ton
 USER ton

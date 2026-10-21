@@ -13,6 +13,7 @@ It reads blocks from the public liteservers through [pytoniq](https://github.com
 | `account_state` | every account seen in a transaction: latest status (argMax by lt), first/last seen, txs, failed, received, fees | forever |
 | `accounts` (view) | one row per account over `account_state`, the current state | — |
 | `account_status_counts` (view) | accounts per workchain and status | — |
+| `op_names` | name, protocol, description and source for known op codes, loaded from `op_names.tsv` on every start | — |
 
 The logger writes through a **Buffer** table, `transactions_buffer`. ClickHouse flushes it to `transactions` every 10–30 s, so `transactions` and the views behind it get about 2 parts a minute instead of one per insert. The buffer lives in ClickHouse's memory. A clean server shutdown flushes it, but a crash loses up to 30 s of rows. Every 5 minutes the logger checks the last ~25 minutes for masterchain blocks with no rows and fetches them again. If the server refuses the Buffer table, the logger inserts into `transactions` directly.
 

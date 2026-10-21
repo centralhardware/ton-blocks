@@ -1,0 +1,33 @@
+op	name	protocol	description	source
+-1	plain transfer	core	no message body: a plain TON transfer (or a bare deploy)	https://docs.ton.org/develop/smart-contracts/guidelines/internal-messages
+0x00000000	text comment	core	op 0 = the body is a text comment	https://docs.ton.org/develop/smart-contracts/guidelines/internal-messages
+0xffffffff	bounce	core	a bounced message coming back to its sender	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0x7369676e	wallet v5 signed external	Wallet v5	"sign": a user-signed request to a v5 wallet (the usual way a v5 wallet sends)	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0x73696e74	wallet v5 signed internal	Wallet v5	"sint": a signed request delivered to a v5 wallet as an internal message (gasless / relayed)	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0xae42e5a4	highload v3 internal transfer	Highload wallet v3	batch of outgoing actions sent by a highload wallet (exchanges, payout services)	https://github.com/xssnick/tonutils-go/blob/master/ton/wallet/highloadv3.go
+0x0f8a7ea5	jetton transfer	Jetton (TEP-74)	owner asks their jetton wallet to send tokens	https://github.com/ton-blockchain/TEPs/blob/master/text/0074-jettons-standard.md
+0x178d4519	jetton internal transfer	Jetton (TEP-74)	jetton wallet to jetton wallet: the tokens moving	https://github.com/ton-blockchain/TEPs/blob/master/text/0074-jettons-standard.md
+0x7362d09c	jetton transfer notification	Jetton (TEP-74)	tells the receiver it got tokens; often rejected by receivers that ignore it (MegatonSwap reuses the same op)	https://github.com/ton-blockchain/TEPs/blob/master/text/0074-jettons-standard.md
+0xd53276db	excesses	Jetton (TEP-74)	returns leftover gas TON to the sender	https://github.com/ton-blockchain/TEPs/blob/master/text/0074-jettons-standard.md
+0x5fcc3d14	NFT transfer	NFT (TEP-62)	owner transfers an NFT	https://github.com/ton-blockchain/TEPs/blob/master/text/0062-nft-standard.md
+0x05138d91	NFT ownership assigned	NFT (TEP-62)	tells the new owner it received an NFT; often rejected by receivers that ignore it	https://github.com/ton-blockchain/TEPs/blob/master/text/0062-nft-standard.md
+0x487a8e81	teleitem start auction	Telegram usernames/numbers (Fragment)	starts an auction for a Telegram username or anonymous number	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0xa37a0983	teleitem ok	Telegram usernames/numbers (Fragment)	acknowledgement from a Telegram username/number item	https://github.com/TelegramMessenger/telemint/blob/main/func/common.fc
+0x299a3e15	teleitem deploy	Telegram usernames/numbers (Fragment)	deploys a Telegram username/number item	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0x4637289b	telemint deploy v2	Telegram usernames/numbers (Fragment)	collection mints a new Telegram username/number item	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0x371638ae	teleitem cancel auction	Telegram usernames/numbers (Fragment)	cancels an auction for a Telegram username/number	https://github.com/TelegramMessenger/telemint/blob/main/func/common.fc
+0x370fec51	auction fill-up	TON DNS / Telemint	tops up a DNS or teleitem contract (also used to extend ownership)	https://github.com/ton-blockchain/dns-contract/blob/main/func/dns-utils.fc
+0x6664de2a	STON.fi swap	STON.fi v2	swap request to a STON.fi v2 router	https://docs.ston.fi/docs/developer-section/api-reference-v2/router
+0x657b54f5	STON.fi pay to	STON.fi v2	router pays out swap/liquidity result	https://github.com/toncenter/ton-indexer/blob/main/indexer/indexer/events/blocks/swaps.py
+0x63381632	STON.fi pay vault	STON.fi v2	router sends a referral fee to the vault	https://github.com/toncenter/ton-indexer/blob/main/indexer/indexer/events/blocks/swaps.py
+0x0490f09b	STON.fi deposit ref fee	STON.fi v2	referral fee deposited into the vault	https://github.com/toncenter/ton-indexer/blob/main/indexer/indexer/events/blocks/swaps.py
+0xf93bb43f	STON.fi payment request	STON.fi	pool asks the router to pay out	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0x01f3835d	pTON transfer	STON.fi pTON	proxy-TON: native TON wrapped to act as a jetton in STON.fi swaps	https://github.com/ston-fi/sdk/blob/main/packages/sdk/src/contracts/pTON/v2_1/constants.ts
+0x61ee542d	DeDust swap external	DeDust	pool tells the vault/peer about a swap	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0xad4eb6f5	DeDust payout from pool	DeDust	pool asks the vault to pay out the swap result	https://github.com/tonkeeper/tongo/blob/master/abi/messages.md
+0xa5a7cbf8	DeDust pay native	DeDust CPMM v2	native TON sent to a DeDust v2 pool to swap	https://github.com/dedust-io/kit/blob/main/src/cpmm-v2/abi/messages/PayNative.ts
+0x3216ca09	DeDust native payout	DeDust CPMM v2	payout callback from a DeDust v2 pool	https://github.com/ton-blockchain/abis/blob/main/data/dedust/cpmm_v2/types/dedust_v2_cpmm.types.tolk
+0x023cd52c	Whales pool update	TON Whales	owner updates a Whales staking pool's parameters	https://github.com/ton-blockchain/abis/blob/main/data/whales/pool/types/whales_pool.types.tolk
+0xedcdab69	MarketApp NFT rent	MarketApp	signed request to rent an NFT (e.g. a Telegram number)	https://github.com/ton-blockchain/abis/blob/main/data/marketapp/nft_rental_v2r2_revision2/types/marketapp_nft_rental_v2r2_revision2.types.tolk
+0x12d10a32	MarketApp NFT rental deploy	MarketApp	marker sent when an NFT rental contract is deployed	https://github.com/ton-blockchain/abis/blob/main/data/marketapp/nft_rental_v2r2_revision2/types/marketapp_nft_rental_v2r2_revision2.types.tolk
+0xf373ace5	Getgems finish auction	Getgems	settles an NFT auction after its end time	https://github.com/ton-blockchain/abis/blob/main/data/getgems/getgems_nft_auction_v4r1/types/getgems_nft_auction_v4r1.types.tolk
