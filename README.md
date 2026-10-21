@@ -7,7 +7,7 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 
 | table | content | retention |
 |---|---|---|
-| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, token amount and counterparty of jetton messages (`jetton_amount`, `jetton_peer`), success/exit code, why the code didn't run (`skip_reason`), action phase result (`action_code`), account status before/after, and `trace_id`. No other hashes, no per-block rows, no masterchain tick-tock. | 90 days (TTL) |
+| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, token amount and counterparty of jetton messages (`jetton_amount`, `jetton_peer`), success/exit code, why the code didn't run (`skip_reason`), action phase result (`action_code`), account status before/after, and `trace_id`. No other hashes, no per-block columns (those are in `block_log`), no masterchain tick-tock. | 90 days (TTL) |
 | `minute` | per minute and workchain: blocks, txs, failed, external-in, volume, fees, out messages, unique accounts/senders (`uniqMerge`), accounts created/deployed/frozen/deleted | forever |
 | `ops_hour` | per hour, workchain and op code (`-1` = no body, `0` = text comment): txs, failed, volume, fees | forever |
 | `account_state` | every account seen in a transaction: latest status (argMax by lt), first/last seen, txs, failed, received, fees | forever |
@@ -17,6 +17,7 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `jettons` | token master → symbol, name, decimals, image | — |
 | `contracts` | account → status, code hash and the interfaces toncenter recognises in that code (`wallet_v5r1`, `jetton_wallet`, `tg_wallet`, …) | — |
 | `code` | the code itself, once per distinct code hash: base64 BOC (bytecode), size, an example account | — |
+| `block_log` | one row per masterchain and shard block: time, transactions, producing validator (`created_by`), key block, split/merge flags, catchain seqno, node version | 90 days (TTL) |
 | `op_names` | name, protocol, description and source for known op codes, loaded from `op_names.tsv` on every start | — |
 
 The logger writes through a **Buffer** table, `transactions_buffer`. ClickHouse flushes it to `transactions` every 10–30 s, so `transactions` and the views behind it get about 2 parts a minute instead of one per insert. The buffer lives in ClickHouse's memory. A clean server shutdown flushes it, but a crash loses up to 30 s of rows. Every 5 minutes the logger checks the last ~25 minutes for masterchain blocks with no rows and fetches them again. If the server refuses the Buffer table, the logger inserts into `transactions` directly.
