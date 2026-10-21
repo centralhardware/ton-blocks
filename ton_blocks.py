@@ -210,7 +210,9 @@ CREATE TABLE IF NOT EXISTS {db}.account_state (
     fees             SimpleAggregateFunction(sum, UInt64)
 )
 ENGINE = AggregatingMergeTree
-ORDER BY account
+-- workchain is implied by the account, but an AggregatingMergeTree refuses a
+-- plain column outside the sorting key
+ORDER BY (workchain, account)
 """,
     """
 CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.account_state_mv TO {db}.account_state AS
