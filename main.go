@@ -949,6 +949,7 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 		sigs: map[sigKey]sigCount{}, cfgHashes: map[int32]string{}}
 	if !dryRun {
 		go watchValidators(ctx, api)
+		go resolveSources(ctx, api)
 		if err := f.loadConfigHashes(); err != nil {
 			return err
 		}

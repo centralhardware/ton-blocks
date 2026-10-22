@@ -18,6 +18,7 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `contracts` | account → status, code hash and the interfaces toncenter recognises in that code (`wallet_v5r1`, `jetton_wallet`, `tg_wallet`, …) | — |
 | `code` | the code itself, once per distinct code hash: base64 BOC (bytecode), its TVM assembly (`asm`, from fift's Disasm.fif in the image), size, an example account | — |
 | `out_messages` | every message a transaction sent: destination, value, op, bounce flags, forward fee, comment; external-out messages (contract events) with their op | — |
+| `code_sources` | verified source code (FunC/Tact/Tolk/Fift files, compiler and version) for code hashes whose author published it on verifier.ton.org; `verified = 0` if nobody did | — |
 | `block_log` | one row per masterchain and shard block: time, transactions, producing validator (`created_by`), key block, split/merge flags, catchain seqno, node version, value flow (`fees_collected`, `burned`, `created`, `minted`, `recovered`, …) | forever |
 | `swaps` | DEX swaps (DeDust, STON.fi v1/v2): pool, user, token and amount in, token and amount out, trace | forever |
 | `balances` | account balance in nanoton, re-read from toncenter after the account transacts (≤ every 5 min); latest = `argMax(balance, at)` | — |
