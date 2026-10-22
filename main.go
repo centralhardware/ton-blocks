@@ -344,37 +344,51 @@ func resumePoint() (uint32, error) {
 
 // row is one slim transaction, as ton.transactions stores it.
 type row struct {
-	Now         uint32  `json:"now"`
-	McSeqno     uint32  `json:"mc_seqno"`
-	Workchain   int32   `json:"workchain"`
-	BlockSeqno  uint32  `json:"block_seqno"`
-	Account     string  `json:"account"`
-	LT          uint64  `json:"lt"`
-	InMsgType   string  `json:"in_msg_type"` // ton.minute_mv counts 'externalin'
-	Src         string  `json:"src"`
-	Value       uint64  `json:"value"`
-	Op          *uint32 `json:"op"`
-	JettonAmt   *string `json:"jetton_amount"` // UInt128 as a decimal string
-	JettonPeer  string  `json:"jetton_peer"`
-	Comment     string  `json:"comment"`
-	TotalFees   uint64  `json:"total_fees"`
-	StorageFees uint64  `json:"storage_fees"`
-	GasFees     uint64  `json:"gas_fees"`
-	FwdFees     uint64  `json:"fwd_fees"`
-	ActionFees  uint64  `json:"action_fees"`
-	GasUsed     uint64  `json:"gas_used"`
-	VMSteps     uint32  `json:"vm_steps"`
-	Bounce      uint8   `json:"bounce"`
-	Bounced     uint8   `json:"bounced"`
-	InitCode    string  `json:"init_code_hash"`
-	Success     uint8   `json:"success"`
-	ExitCode    *int32  `json:"exit_code"`
-	SkipReason  string  `json:"skip_reason"`
-	ActionCode  *int32  `json:"action_code"`
-	OutMsgs     uint16  `json:"out_msgs"`
-	OrigStatus  string  `json:"orig_status"`
-	EndStatus   string  `json:"end_status"`
-	TraceID     string  `json:"trace_id"` // UInt256 as a decimal string in JSON
+	Now             uint32            `json:"now"`
+	McSeqno         uint32            `json:"mc_seqno"`
+	Workchain       int32             `json:"workchain"`
+	BlockSeqno      uint32            `json:"block_seqno"`
+	Account         string            `json:"account"`
+	LT              uint64            `json:"lt"`
+	InMsgType       string            `json:"in_msg_type"` // ton.minute_mv counts 'externalin'
+	Src             string            `json:"src"`
+	Value           uint64            `json:"value"`
+	Op              *uint32           `json:"op"`
+	JettonAmt       *string           `json:"jetton_amount"` // UInt128 as a decimal string
+	JettonPeer      string            `json:"jetton_peer"`
+	Comment         string            `json:"comment"`
+	TotalFees       uint64            `json:"total_fees"`
+	StorageFees     uint64            `json:"storage_fees"`
+	GasFees         uint64            `json:"gas_fees"`
+	FwdFees         uint64            `json:"fwd_fees"`
+	ActionFees      uint64            `json:"action_fees"`
+	GasUsed         uint64            `json:"gas_used"`
+	VMSteps         uint32            `json:"vm_steps"`
+	Bounce          uint8             `json:"bounce"`
+	Bounced         uint8             `json:"bounced"`
+	InitCode        string            `json:"init_code_hash"`
+	Success         uint8             `json:"success"`
+	ExitCode        *int32            `json:"exit_code"`
+	SkipReason      string            `json:"skip_reason"`
+	ActionCode      *int32            `json:"action_code"`
+	OutMsgs         uint16            `json:"out_msgs"`
+	OrigStatus      string            `json:"orig_status"`
+	EndStatus       string            `json:"end_status"`
+	TraceID         string            `json:"trace_id"` // UInt256 as a decimal string in JSON
+	Hash            string            `json:"hash"`     // this transaction's hash, UInt256 likewise
+	TxType          string            `json:"tx_type"`
+	Destroyed       uint8             `json:"destroyed"`
+	GasLimit        uint64            `json:"gas_limit"`
+	GasCredit       uint64            `json:"gas_credit"`
+	ExitArg         *int32            `json:"exit_arg"`
+	TotalActions    uint16            `json:"total_actions"`
+	SkippedActions  uint16            `json:"skipped_actions"`
+	MsgsCreated     uint16            `json:"msgs_created"`
+	MsgCells        uint64            `json:"msg_cells"`
+	MsgBits         uint64            `json:"msg_bits"`
+	IHRFee          uint64            `json:"ihr_fee"`
+	InCreatedLT     uint64            `json:"in_created_lt"`
+	ExtraCurrencies map[string]string `json:"extra_currencies"`
 }
 
 var statuses = map[tlb.AccountStatus]string{
@@ -521,14 +535,6 @@ func descField(desc any, name string) reflect.Value {
 	return v.FieldByName(name)
 }
 
-func isTickTock(tx *tlb.Transaction) bool {
-	switch tx.Description.(type) {
-	case tlb.TransactionDescriptionTickTock, *tlb.TransactionDescriptionTickTock:
-		return true
-	}
-	return false
-}
-
 // exitCode is the compute phase's exit code; when the phase was skipped there
 // is none and skip is why (NO_STATE, BAD_STATE, NO_GAS, SUSPENDED).
 func exitCode(tx *tlb.Transaction) (code *int32, skip string) {
@@ -584,6 +590,9 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 	}
 	r.ExitCode, r.SkipReason = exitCode(tx)
 	fees(tx, &r)
+	details(tx, &r)
+	r.Hash, r.TxType = hashInt(tx.Hash), txType(tx)
+	r.ExtraCurrencies = map[string]string{}
 	if a := descField(tx.Description, "Aborted"); a.IsValid() && a.Bool() {
 		r.Success = 0
 	}
@@ -595,6 +604,8 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 		if in.MsgType == tlb.MsgTypeInternal {
 			m := in.AsInternal()
 			r.Bounce, r.Bounced = b2u(m.Bounce), b2u(m.Bounced)
+			r.IHRFee, r.InCreatedLT = m.IHRFee.Nano().Uint64(), m.CreatedLT
+			r.ExtraCurrencies = extraCurrencies(m.ExtraCurrencies)
 			r.Src = m.SrcAddr.StringRaw()
 			r.Value = m.Amount.Nano().Uint64()
 		}
@@ -619,6 +630,7 @@ type blockRow struct {
 	WantMerge     bool   `json:"want_merge"`
 	CatchainSeqno uint32 `json:"catchain_seqno"`
 	GenVersion    uint32 `json:"gen_version"`
+	valueFlow
 }
 
 func newBlockRow(mcSeqno uint32, blk *ton.BlockIDExt, data *tlb.Block, txs int) blockRow {
@@ -635,6 +647,11 @@ func newBlockRow(mcSeqno uint32, blk *ton.BlockIDExt, data *tlb.Block, txs int) 
 	if data.Extra != nil {
 		r.CreatedBy = fmt.Sprintf("%x", data.Extra.CreatedBy)
 	}
+	if vf, err := parseValueFlow(data.ValueFlow); err == nil {
+		r.valueFlow = vf
+	} else {
+		log.Printf("block %d:%016x:%d value flow: %v", blk.Workchain, uint64(blk.Shard), blk.SeqNo, err)
+	}
 	return r
 }
 
@@ -649,17 +666,22 @@ type traced struct {
 }
 
 type follower struct {
-	api      ton.APIClientWrapped
-	dryRun   bool
-	prevTops []*ton.BlockIDExt // shard tops of the last processed mc block
-	rows     []row
-	traces   map[string]traced // out message hash -> its trace
-	lastSave time.Time
-	blocks   []blockRow // flushed every blocksEvery: a few rows a second only
-	swaps    []swapRow  // likewise
-	outs     []outRow   // flushed with rows
-	blocksAt time.Time
-	mcSeqno  uint32 // the mc block being processed
+	api       ton.APIClientWrapped
+	dryRun    bool
+	prevTops  []*ton.BlockIDExt // shard tops of the last processed mc block
+	rows      []row
+	traces    map[string]traced // out message hash -> its trace
+	lastSave  time.Time
+	blocks    []blockRow // flushed every blocksEvery: a few rows a second only
+	swaps     []swapRow  // likewise
+	outs      []outRow   // flushed with rows
+	mcData    *tlb.Block // the mc block being processed, for config changes
+	vset      *vset
+	sigs      map[sigKey]sigCount // flushed with blocks
+	cfgHashes map[int32]string
+	configs   []configRow // flushed with blocks
+	blocksAt  time.Time
+	mcSeqno   uint32 // the mc block being processed
 }
 
 func connect(ctx context.Context) (ton.APIClientWrapped, error) {
@@ -690,6 +712,9 @@ func (f *follower) oneBlock(ctx context.Context, blk *ton.BlockIDExt, txs *[]blo
 		*txs = append(*txs, blockTx{blk, t})
 	}
 	f.blocks = append(f.blocks, newBlockRow(f.mcSeqno, blk, data, len(list)))
+	if blk.Workchain == -1 {
+		f.mcData = data
+	}
 	return ton.GetParentBlocks(&data.BlockInfo)
 }
 
@@ -714,8 +739,8 @@ func covered(b *ton.BlockIDExt, prevTops []*ton.BlockIDExt) bool {
 // traceRows builds the rows for one mc block's transactions, each tagged with
 // its trace. A child's lt is always above its parent's, so in lt order every
 // parent in this mc block is linked before its children; parents from earlier
-// mc blocks come from f.traces. Tick-tock transactions are linked (their
-// messages start traces too) but not stored.
+// mc blocks come from f.traces. Tick-tock transactions are stored too
+// (tx_type tick/tock); the summary views leave them out.
 //
 // Message hashes are taken from re-serialized messages on both sides (sender's
 // out list, receiver's in message), so they always agree with each other.
@@ -756,15 +781,13 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 				f.traces[string(c.Hash())] = traced{trace, mcSeqno}
 			}
 		}
-		if !isTickTock(t) {
-			r := txRow(bt.blk, mcSeqno, t, trace)
-			rows = append(rows, r)
-			f.outs = append(f.outs, outRows(t, r.Account, mcSeqno, trace)...)
-			if sw := swapOf(t); sw != nil {
-				sw.Now, sw.McSeqno, sw.TraceID = t.Now, mcSeqno, trace.String()
-				sw.Pool = fmt.Sprintf("%d:%x", bt.blk.Workchain, t.AccountAddr)
-				f.swaps = append(f.swaps, *sw)
-			}
+		r := txRow(bt.blk, mcSeqno, t, trace)
+		rows = append(rows, r)
+		f.outs = append(f.outs, outRows(t, r.Account, mcSeqno, trace)...)
+		if sw := swapOf(t); sw != nil {
+			sw.Now, sw.McSeqno, sw.TraceID = t.Now, mcSeqno, trace.String()
+			sw.Pool = fmt.Sprintf("%d:%x", bt.blk.Workchain, t.AccountAddr)
+			f.swaps = append(f.swaps, *sw)
 		}
 	}
 	if mcSeqno%100 == 0 {
@@ -832,6 +855,13 @@ func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error)
 	if err != nil {
 		return 0, err
 	}
+	// signatures and config last: they aren't rolled back on a retry
+	if err := f.countSignatures(ctx, seqno); err != nil {
+		log.Printf("mc %d signatures: %v", seqno, err)
+	}
+	if err := f.configChanges(seqno, f.mcData); err != nil {
+		log.Printf("mc %d config: %v", seqno, err)
+	}
 	f.rows = append(f.rows, rows...)
 	f.prevTops = tops
 	return len(seen) + 1, nil
@@ -849,11 +879,23 @@ func (f *follower) flush(force bool) error {
 			if err := insert("swaps", f.swaps); err != nil {
 				return err
 			}
-		} else if len(f.swaps) > 0 {
-			first, _ := json.Marshal(f.swaps[0])
-			log.Printf("swaps: %d (first: %s)", len(f.swaps), first)
+			if err := insert("validator_signatures", f.sigRows()); err != nil {
+				return err
+			}
+			if err := insert("config_changes", f.configs); err != nil {
+				return err
+			}
+		} else {
+			if len(f.swaps) > 0 {
+				first, _ := json.Marshal(f.swaps[0])
+				log.Printf("swaps: %d (first: %s)", len(f.swaps), first)
+			}
+			sigs, _ := json.Marshal(f.sigRows())
+			log.Printf("signatures: %.300s", sigs)
+			log.Printf("config changes: %d", len(f.configs))
 		}
-		f.blocks, f.swaps = nil, nil
+		f.blocks, f.swaps, f.configs = nil, nil, nil
+		f.sigs = map[sigKey]sigCount{}
 		f.blocksAt = time.Now()
 	}
 	due := force || len(f.rows) >= flushRows || time.Since(f.lastSave) >= flushEvery
@@ -899,9 +941,13 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 	if err != nil {
 		return err
 	}
-	f := &follower{api: api, dryRun: dryRun, traces: map[string]traced{}, lastSave: time.Now()}
+	f := &follower{api: api, dryRun: dryRun, traces: map[string]traced{}, lastSave: time.Now(),
+		sigs: map[sigKey]sigCount{}, cfgHashes: map[int32]string{}}
 	if !dryRun {
 		go watchValidators(ctx, api)
+		if err := f.loadConfigHashes(); err != nil {
+			return err
+		}
 	}
 	nxt := start
 	if nxt == 0 && !dryRun {
