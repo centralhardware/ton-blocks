@@ -7,7 +7,7 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 
 | table | content | retention |
 |---|---|---|
-| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, token amount and counterparty of jetton messages (`jetton_amount`, `jetton_peer`), fee breakdown (`storage_fees`, `gas_fees`, `fwd_fees`, `action_fees`, `gas_used`, `vm_steps`), bounce flags (`bounce`, `bounced`), code a deployment installs (`init_code_hash`), text comment (`comment`: op 0 bodies and the forward payload of jetton transfer notifications, up to 512 bytes), success/exit code, why the code didn't run (`skip_reason`), action phase result (`action_code`), account status before/after, and `trace_id`. No other hashes, no per-block columns (those are in `block_log`), no masterchain tick-tock. | 90 days (TTL) |
+| `transactions` | one slim row per transaction: time, account, sender, value, op code, fees, token amount and counterparty of jetton messages (`jetton_amount`, `jetton_peer`), fee breakdown (`storage_fees`, `gas_fees`, `fwd_fees`, `action_fees`, `gas_used`, `vm_steps`), bounce flags (`bounce`, `bounced`), code a deployment installs (`init_code_hash`), text comment (`comment`: op 0 bodies and the forward payload of jetton transfer notifications, up to 512 bytes), success/exit code, why the code didn't run (`skip_reason`), action phase result (`action_code`), account status before/after, and `trace_id`. No other hashes, no per-block columns (those are in `block_log`), no masterchain tick-tock. | forever |
 | `minute` | per minute and workchain: blocks, txs, failed, external-in, volume, fees, out messages, unique accounts/senders (`uniqMerge`), accounts created/deployed/frozen/deleted | forever |
 | `ops_hour` | per hour, workchain and op code (`-1` = no body, `0` = text comment): txs, failed, volume, fees | forever |
 | `account_state` | every account seen in a transaction: latest status (argMax by lt), first/last seen, txs, failed, received, fees | forever |
@@ -18,8 +18,8 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `contracts` | account → status, code hash and the interfaces toncenter recognises in that code (`wallet_v5r1`, `jetton_wallet`, `tg_wallet`, …) | — |
 | `code` | the code itself, once per distinct code hash: base64 BOC (bytecode), its TVM assembly (`asm`, from fift's Disasm.fif in the image), size, an example account | — |
 | `out_messages` | every message a transaction sent: destination, value, op, bounce flags, forward fee, comment; external-out messages (contract events) with their op | — |
-| `block_log` | one row per masterchain and shard block: time, transactions, producing validator (`created_by`), key block, split/merge flags, catchain seqno, node version | 90 days (TTL) |
-| `swaps` | DEX swaps (DeDust, STON.fi v1/v2): pool, user, token and amount in, token and amount out, trace | 90 days (TTL) |
+| `block_log` | one row per masterchain and shard block: time, transactions, producing validator (`created_by`), key block, split/merge flags, catchain seqno, node version | forever |
+| `swaps` | DEX swaps (DeDust, STON.fi v1/v2): pool, user, token and amount in, token and amount out, trace | forever |
 | `balances` | account balance in nanoton, re-read from toncenter after the account transacts (≤ every 5 min); latest = `argMax(balance, at)` | — |
 | `nft_items` / `nft_collections` | NFT item → collection, real owner, index, name, image, on sale; re-read after each NFT transfer | — |
 | `validators` | current (param 34) and next (36) validator sets: pubkey (= `block_log.created_by`), weight, share, ADNL | — |
