@@ -679,6 +679,7 @@ type follower struct {
 	vset      *vset
 	sigs      map[sigKey]sigCount // flushed with blocks
 	cfgHashes map[int32]string
+	sigFails  int
 	configs   []configRow // flushed with blocks
 	blocksAt  time.Time
 	mcSeqno   uint32 // the mc block being processed
@@ -857,7 +858,10 @@ func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error)
 	}
 	// signatures and config last: they aren't rolled back on a retry
 	if err := f.countSignatures(ctx, seqno); err != nil {
-		log.Printf("mc %d signatures: %v", seqno, err)
+		f.sigFails++ // a skipped sample; logged as a count, not one by one
+		if f.sigFails%100 == 1 {
+			log.Printf("signature samples skipped: %d (last: mc %d: %.200v)", f.sigFails, seqno, err)
+		}
 	}
 	if err := f.configChanges(seqno, f.mcData); err != nil {
 		log.Printf("mc %d config: %v", seqno, err)
