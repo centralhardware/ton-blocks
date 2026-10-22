@@ -18,7 +18,6 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `contracts` | account → status, code hash and the interfaces toncenter recognises in that code (`wallet_v5r1`, `jetton_wallet`, `tg_wallet`, …) | — |
 | `code` | the code itself, once per distinct code hash: base64 BOC (bytecode), its TVM assembly (`asm`, from fift's Disasm.fif in the image), size, an example account | — |
 | `out_messages` | every message a transaction sent: destination, value, op, bounce flags, forward fee, comment; external-out messages (contract events) with their body (`event_boc`) | 90 days (TTL) |
-| `message_bodies` | raw body (base64 BOC) of each transaction's incoming message, up to 16 KiB | 14 days (TTL) |
 | `block_log` | one row per masterchain and shard block: time, transactions, producing validator (`created_by`), key block, split/merge flags, catchain seqno, node version | 90 days (TTL) |
 | `swaps` | DEX swaps (DeDust, STON.fi v1/v2): pool, user, token and amount in, token and amount out, trace | 90 days (TTL) |
 | `op_names` | name, protocol, description and source for known op codes, loaded from `op_names.tsv` on every start | — |

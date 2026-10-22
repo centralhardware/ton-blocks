@@ -658,7 +658,6 @@ type follower struct {
 	blocks   []blockRow // flushed every blocksEvery: a few rows a second only
 	swaps    []swapRow  // likewise
 	outs     []outRow   // flushed with rows
-	bodies   []bodyRow  // likewise
 	blocksAt time.Time
 	mcSeqno  uint32 // the mc block being processed
 }
@@ -761,11 +760,6 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 			r := txRow(bt.blk, mcSeqno, t, trace)
 			rows = append(rows, r)
 			f.outs = append(f.outs, outRows(t, r.Account, mcSeqno, trace)...)
-			if in := t.IO.In; in != nil {
-				if b := boc(in.Msg.Payload()); b != "" && len(b) <= maxBody {
-					f.bodies = append(f.bodies, bodyRow{t.Now, r.Account, t.LT, b})
-				}
-			}
 			if sw := swapOf(t); sw != nil {
 				sw.Now, sw.McSeqno, sw.TraceID = t.Now, mcSeqno, trace.String()
 				sw.Pool = fmt.Sprintf("%d:%x", bt.blk.Workchain, t.AccountAddr)
@@ -790,11 +784,11 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error) {
 	var txs []blockTx
 	f.mcSeqno = seqno
-	nBlocks, nSwaps, nOuts, nBodies := len(f.blocks), len(f.swaps), len(f.outs), len(f.bodies)
+	nBlocks, nSwaps, nOuts := len(f.blocks), len(f.swaps), len(f.outs)
 	defer func() {
 		if err != nil { // the mc block is retried whole; drop its partial block rows
 			f.blocks, f.swaps = f.blocks[:nBlocks], f.swaps[:nSwaps]
-			f.outs, f.bodies = f.outs[:nOuts], f.bodies[:nBodies]
+			f.outs = f.outs[:nOuts]
 		}
 	}()
 	mc, err := f.mcID(ctx, seqno)
@@ -873,24 +867,20 @@ func (f *follower) flush(force bool) error {
 			first, _ = json.Marshal(f.outs[len(f.outs)-1])
 			log.Printf("out messages: %d (last: %s)", len(f.outs), first)
 		}
-		log.Printf("bodies: %d", len(f.bodies))
 	} else {
-		// side tables first: if the transactions insert then fails, the retry
+		// out messages first: if the transactions insert then fails, the retry
 		// inserts them again and ReplacingMergeTree drops the duplicates
 		if err := insert("out_messages_buffer", f.outs); err != nil {
 			return err
 		}
-		if err := insert("message_bodies_buffer", f.bodies); err != nil {
-			return err
-		}
-		f.outs, f.bodies = nil, nil
+		f.outs = nil
 		if err := insert(insertTable, f.rows); err != nil {
 			// one INSERT per flush, so the minute view sees each batch exactly once;
 			// on failure the rows stay and go with the next flush
 			return err
 		}
 	}
-	f.rows, f.outs, f.bodies = nil, nil, nil
+	f.rows, f.outs = nil, nil
 	f.lastSave = time.Now()
 	return nil
 }

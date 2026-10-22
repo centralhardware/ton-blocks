@@ -47,19 +47,3 @@ TTL now + INTERVAL 90 DAY;
 
 CREATE TABLE IF NOT EXISTS ton.out_messages_buffer AS ton.out_messages
 ENGINE = Buffer(ton, out_messages, 1, 10, 30, 10000, 500000, 10000000, 200000000);
-
--- the raw body of each transaction's incoming message (base64 BOC; bodies over
--- 16 KiB are skipped). Large and incompressible, so kept 14 days only.
-CREATE TABLE IF NOT EXISTS ton.message_bodies (
-    now      DateTime('UTC'),
-    account  String CODEC(ZSTD(3)),
-    lt       UInt64,
-    boc      String CODEC(ZSTD(3))
-)
-ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMMDD(now)
-ORDER BY (account, lt)
-TTL now + INTERVAL 14 DAY;
-
-CREATE TABLE IF NOT EXISTS ton.message_bodies_buffer AS ton.message_bodies
-ENGINE = Buffer(ton, message_bodies, 1, 10, 30, 10000, 500000, 10000000, 200000000);

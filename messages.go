@@ -32,16 +32,7 @@ type outRow struct {
 	EventBOC string  `json:"event_boc"` // external-out body, base64 BOC
 }
 
-// bodyRow is the raw body of a transaction's incoming message.
-type bodyRow struct {
-	Now     uint32 `json:"now"`
-	Account string `json:"account"`
-	LT      uint64 `json:"lt"`
-	BOC     string `json:"boc"`
-}
-
-// maxBody skips storing a body larger than this (base64 bytes); they're rare
-// and mostly code deployments, whose code is in ton.code anyway.
+// maxBody skips storing an event body larger than this (base64 bytes).
 const maxBody = 16 << 10
 
 func boc(c *cell.Cell) string {
