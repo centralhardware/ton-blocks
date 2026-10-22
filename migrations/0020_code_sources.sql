@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS ton.code_sources (
     compiler          LowCardinality(String),
     compiler_version  String,
     command_line      String,
-    files             Nested(name String, content String CODEC(ZSTD(9)), entrypoint Bool),
+    files             Nested(name String, content String, entrypoint Bool),
     ipfs              String,
     checked_at        DateTime('UTC')
 )
