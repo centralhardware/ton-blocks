@@ -126,11 +126,12 @@ type sigRow struct {
 
 // Mc blocks don't carry their signatures (prev_blk_signatures is empty on
 // mainnet); they come with a block proof, one liteserver request per block.
-// So only every sigEvery-th mc block is checked, sigBehind blocks back so the
-// liteserver surely has its successor.
+// So only every sigEvery-th mc block is checked, sigBehind blocks back: public
+// liteservers lag by dozens of blocks at times, and a proof for a block newer
+// than the server's own tip fails.
 const (
 	sigEvery  = 10
-	sigBehind = 30
+	sigBehind = 100
 )
 
 func (f *follower) loadVset(ctx context.Context, mc *ton.BlockIDExt) error {
@@ -179,7 +180,7 @@ func (f *follower) countSignatures(ctx context.Context, seqno uint32) error {
 			return err
 		}
 	}
-	proof, err := f.api.GetBlockProof(ctx, prev, target)
+	proof, err := f.api.WithRetry(3).GetBlockProof(ctx, prev, target)
 	if err != nil {
 		return err
 	}
