@@ -7,7 +7,6 @@ import (
 
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
-	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
 // outRow is one message a transaction sent, as ton.out_messages stores it.
@@ -15,31 +14,20 @@ import (
 // do bounced-back and never-delivered ones appear, and external-out messages
 // (contract events/logs) appear nowhere else.
 type outRow struct {
-	Now      uint32  `json:"now"`
-	McSeqno  uint32  `json:"mc_seqno"`
-	TraceID  string  `json:"trace_id"`
-	Account  string  `json:"account"`
-	LT       uint64  `json:"lt"`
-	Idx      uint16  `json:"idx"`
-	Type     string  `json:"type"` // internal | externalout
-	Dest     string  `json:"dest"` // '' for an external-out without one
-	Value    uint64  `json:"value"`
-	Op       *uint32 `json:"op"`
-	Bounce   uint8   `json:"bounce"`
-	Bounced  uint8   `json:"bounced"`
-	FwdFee   uint64  `json:"fwd_fee"`
-	Comment  string  `json:"comment"`
-	EventBOC string  `json:"event_boc"` // external-out body, base64 BOC
-}
-
-// maxBody skips storing an event body larger than this (base64 bytes).
-const maxBody = 16 << 10
-
-func boc(c *cell.Cell) string {
-	if c == nil {
-		return ""
-	}
-	return base64.StdEncoding.EncodeToString(c.ToBOC())
+	Now     uint32  `json:"now"`
+	McSeqno uint32  `json:"mc_seqno"`
+	TraceID string  `json:"trace_id"`
+	Account string  `json:"account"`
+	LT      uint64  `json:"lt"`
+	Idx     uint16  `json:"idx"`
+	Type    string  `json:"type"` // internal | externalout
+	Dest    string  `json:"dest"` // '' for an external-out without one
+	Value   uint64  `json:"value"`
+	Op      *uint32 `json:"op"`
+	Bounce  uint8   `json:"bounce"`
+	Bounced uint8   `json:"bounced"`
+	FwdFee  uint64  `json:"fwd_fee"`
+	Comment string  `json:"comment"`
 }
 
 func outRows(tx *tlb.Transaction, account string, mcSeqno uint32, trace *big.Int) []outRow {
@@ -58,9 +46,6 @@ func outRows(tx *tlb.Transaction, account string, mcSeqno uint32, trace *big.Int
 			r.Type = "externalout"
 			if em.DstAddr != nil && em.DstAddr.Type() == address.ExtAddress {
 				r.Dest = fmt.Sprintf("%x", em.DstAddr.Data())
-			}
-			if s := boc(em.Body); len(s) <= maxBody {
-				r.EventBOC = s
 			}
 		default:
 			continue

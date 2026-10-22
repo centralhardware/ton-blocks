@@ -22,7 +22,7 @@ ENGINE = Buffer(ton, transactions, 1, 10, 30, 10000, 500000, 10000000, 200000000
 
 -- every message a transaction sent (account = sender, lt = its transaction).
 -- type 'externalout' = a contract event/log: dest is the external address in
--- hex ('' if none), event_boc its body (base64 BOC, '' over 16 KiB).
+-- hex ('' if none), op its op. Kept forever, like the other tables' rows here.
 CREATE TABLE IF NOT EXISTS ton.out_messages (
     now        DateTime('UTC'),
     mc_seqno   UInt32,
@@ -37,13 +37,10 @@ CREATE TABLE IF NOT EXISTS ton.out_messages (
     bounce     UInt8,
     bounced    UInt8,
     fwd_fee    UInt64,
-    comment    String CODEC(ZSTD(3)),
-    event_boc  String CODEC(ZSTD(3))
+    comment    String CODEC(ZSTD(3))
 )
 ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMM(now)
-ORDER BY (account, lt, idx)
-TTL now + INTERVAL 90 DAY;
+ORDER BY (account, lt, idx);
 
 CREATE TABLE IF NOT EXISTS ton.out_messages_buffer AS ton.out_messages
 ENGINE = Buffer(ton, out_messages, 1, 10, 30, 10000, 500000, 10000000, 200000000);
