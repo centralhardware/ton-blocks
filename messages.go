@@ -14,36 +14,41 @@ import (
 // do bounced-back and never-delivered ones appear, and external-out messages
 // (contract events/logs) appear nowhere else.
 type outRow struct {
-	Now     uint32  `json:"now"`
-	McSeqno uint32  `json:"mc_seqno"`
-	TraceID string  `json:"trace_id"`
-	Account string  `json:"account"`
-	LT      uint64  `json:"lt"`
-	Idx     uint16  `json:"idx"`
-	Type    string  `json:"type"` // internal | externalout
-	Dest    string  `json:"dest"` // '' for an external-out without one
-	Value   uint64  `json:"value"`
-	Op      *uint32 `json:"op"`
-	Bounce  uint8   `json:"bounce"`
-	Bounced uint8   `json:"bounced"`
-	FwdFee  uint64  `json:"fwd_fee"`
-	Comment string  `json:"comment"`
+	Now             uint32            `json:"now"`
+	McSeqno         uint32            `json:"mc_seqno"`
+	TraceID         string            `json:"trace_id"`
+	Account         string            `json:"account"`
+	LT              uint64            `json:"lt"`
+	Idx             uint16            `json:"idx"`
+	Type            string            `json:"type"` // internal | externalout
+	Dest            string            `json:"dest"` // '' for an external-out without one
+	Value           uint64            `json:"value"`
+	Op              *uint32           `json:"op"`
+	Bounce          uint8             `json:"bounce"`
+	Bounced         uint8             `json:"bounced"`
+	FwdFee          uint64            `json:"fwd_fee"`
+	Comment         string            `json:"comment"`
+	CreatedLT       uint64            `json:"created_lt"`
+	IHRFee          uint64            `json:"ihr_fee"`
+	ExtraCurrencies map[string]string `json:"extra_currencies"`
 }
 
 func outRows(tx *tlb.Transaction, account string, mcSeqno uint32, trace *big.Int) []outRow {
 	var rows []outRow
 	for i, m := range outMessages(tx) {
 		r := outRow{Now: tx.Now, McSeqno: mcSeqno, TraceID: trace.String(), Account: account,
-			LT: tx.LT, Idx: uint16(i), Op: opOf(&m), Comment: commentText(&m)}
+			LT: tx.LT, Idx: uint16(i), Op: opOf(&m), Comment: commentText(&m), ExtraCurrencies: map[string]string{}}
 		switch m.MsgType {
 		case tlb.MsgTypeInternal:
 			im := m.AsInternal()
 			r.Type, r.Dest, r.Value = "internal", addrStr(im.DstAddr), im.Amount.Nano().Uint64()
 			r.FwdFee = im.FwdFee.Nano().Uint64()
 			r.Bounce, r.Bounced = b2u(im.Bounce), b2u(im.Bounced)
+			r.CreatedLT, r.IHRFee = im.CreatedLT, im.IHRFee.Nano().Uint64()
+			r.ExtraCurrencies = extraCurrencies(im.ExtraCurrencies)
 		case tlb.MsgTypeExternalOut:
 			em := m.AsExternalOut()
-			r.Type = "externalout"
+			r.Type, r.CreatedLT = "externalout", em.CreatedLT
 			if em.DstAddr != nil && em.DstAddr.Type() == address.ExtAddress {
 				r.Dest = fmt.Sprintf("%x", em.DstAddr.Data())
 			}
