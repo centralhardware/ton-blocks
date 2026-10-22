@@ -344,28 +344,37 @@ func resumePoint() (uint32, error) {
 
 // row is one slim transaction, as ton.transactions stores it.
 type row struct {
-	Now        uint32  `json:"now"`
-	McSeqno    uint32  `json:"mc_seqno"`
-	Workchain  int32   `json:"workchain"`
-	BlockSeqno uint32  `json:"block_seqno"`
-	Account    string  `json:"account"`
-	LT         uint64  `json:"lt"`
-	InMsgType  string  `json:"in_msg_type"` // ton.minute_mv counts 'externalin'
-	Src        string  `json:"src"`
-	Value      uint64  `json:"value"`
-	Op         *uint32 `json:"op"`
-	JettonAmt  *string `json:"jetton_amount"` // UInt128 as a decimal string
-	JettonPeer string  `json:"jetton_peer"`
-	Comment    string  `json:"comment"`
-	TotalFees  uint64  `json:"total_fees"`
-	Success    uint8   `json:"success"`
-	ExitCode   *int32  `json:"exit_code"`
-	SkipReason string  `json:"skip_reason"`
-	ActionCode *int32  `json:"action_code"`
-	OutMsgs    uint16  `json:"out_msgs"`
-	OrigStatus string  `json:"orig_status"`
-	EndStatus  string  `json:"end_status"`
-	TraceID    string  `json:"trace_id"` // UInt256 as a decimal string in JSON
+	Now         uint32  `json:"now"`
+	McSeqno     uint32  `json:"mc_seqno"`
+	Workchain   int32   `json:"workchain"`
+	BlockSeqno  uint32  `json:"block_seqno"`
+	Account     string  `json:"account"`
+	LT          uint64  `json:"lt"`
+	InMsgType   string  `json:"in_msg_type"` // ton.minute_mv counts 'externalin'
+	Src         string  `json:"src"`
+	Value       uint64  `json:"value"`
+	Op          *uint32 `json:"op"`
+	JettonAmt   *string `json:"jetton_amount"` // UInt128 as a decimal string
+	JettonPeer  string  `json:"jetton_peer"`
+	Comment     string  `json:"comment"`
+	TotalFees   uint64  `json:"total_fees"`
+	StorageFees uint64  `json:"storage_fees"`
+	GasFees     uint64  `json:"gas_fees"`
+	FwdFees     uint64  `json:"fwd_fees"`
+	ActionFees  uint64  `json:"action_fees"`
+	GasUsed     uint64  `json:"gas_used"`
+	VMSteps     uint32  `json:"vm_steps"`
+	Bounce      uint8   `json:"bounce"`
+	Bounced     uint8   `json:"bounced"`
+	InitCode    string  `json:"init_code_hash"`
+	Success     uint8   `json:"success"`
+	ExitCode    *int32  `json:"exit_code"`
+	SkipReason  string  `json:"skip_reason"`
+	ActionCode  *int32  `json:"action_code"`
+	OutMsgs     uint16  `json:"out_msgs"`
+	OrigStatus  string  `json:"orig_status"`
+	EndStatus   string  `json:"end_status"`
+	TraceID     string  `json:"trace_id"` // UInt256 as a decimal string in JSON
 }
 
 var statuses = map[tlb.AccountStatus]string{
@@ -574,6 +583,7 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 		TraceID:    trace.String(),
 	}
 	r.ExitCode, r.SkipReason = exitCode(tx)
+	fees(tx, &r)
 	if a := descField(tx.Description, "Aborted"); a.IsValid() && a.Bool() {
 		r.Success = 0
 	}
@@ -581,8 +591,10 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 		r.Op = opOf(in)
 		r.JettonAmt, r.JettonPeer = jettonAmount(in)
 		r.Comment = commentText(in)
+		r.InitCode = initCodeHash(in)
 		if in.MsgType == tlb.MsgTypeInternal {
 			m := in.AsInternal()
+			r.Bounce, r.Bounced = b2u(m.Bounce), b2u(m.Bounced)
 			r.Src = m.SrcAddr.StringRaw()
 			r.Value = m.Amount.Nano().Uint64()
 		}
@@ -645,6 +657,8 @@ type follower struct {
 	lastSave time.Time
 	blocks   []blockRow // flushed every blocksEvery: a few rows a second only
 	swaps    []swapRow  // likewise
+	outs     []outRow   // flushed with rows
+	bodies   []bodyRow  // likewise
 	blocksAt time.Time
 	mcSeqno  uint32 // the mc block being processed
 }
@@ -744,7 +758,14 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 			}
 		}
 		if !isTickTock(t) {
-			rows = append(rows, txRow(bt.blk, mcSeqno, t, trace))
+			r := txRow(bt.blk, mcSeqno, t, trace)
+			rows = append(rows, r)
+			f.outs = append(f.outs, outRows(t, r.Account, mcSeqno, trace)...)
+			if in := t.IO.In; in != nil {
+				if b := boc(in.Msg.Payload()); b != "" && len(b) <= maxBody {
+					f.bodies = append(f.bodies, bodyRow{t.Now, r.Account, t.LT, b})
+				}
+			}
 			if sw := swapOf(t); sw != nil {
 				sw.Now, sw.McSeqno, sw.TraceID = t.Now, mcSeqno, trace.String()
 				sw.Pool = fmt.Sprintf("%d:%x", bt.blk.Workchain, t.AccountAddr)
@@ -769,10 +790,11 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error) {
 	var txs []blockTx
 	f.mcSeqno = seqno
-	nBlocks, nSwaps := len(f.blocks), len(f.swaps)
+	nBlocks, nSwaps, nOuts, nBodies := len(f.blocks), len(f.swaps), len(f.outs), len(f.bodies)
 	defer func() {
 		if err != nil { // the mc block is retried whole; drop its partial block rows
 			f.blocks, f.swaps = f.blocks[:nBlocks], f.swaps[:nSwaps]
+			f.outs, f.bodies = f.outs[:nOuts], f.bodies[:nBodies]
 		}
 	}()
 	mc, err := f.mcID(ctx, seqno)
@@ -847,12 +869,28 @@ func (f *follower) flush(force bool) error {
 	if f.dryRun {
 		first, _ := json.Marshal(f.rows[0])
 		log.Printf("transactions: %d (first: %s)", len(f.rows), first)
-	} else if err := insert(insertTable, f.rows); err != nil {
-		// one INSERT per flush, so the minute view sees each batch exactly once;
-		// on failure the rows stay and go with the next flush
-		return err
+		if len(f.outs) > 0 {
+			first, _ = json.Marshal(f.outs[len(f.outs)-1])
+			log.Printf("out messages: %d (last: %s)", len(f.outs), first)
+		}
+		log.Printf("bodies: %d", len(f.bodies))
+	} else {
+		// side tables first: if the transactions insert then fails, the retry
+		// inserts them again and ReplacingMergeTree drops the duplicates
+		if err := insert("out_messages_buffer", f.outs); err != nil {
+			return err
+		}
+		if err := insert("message_bodies_buffer", f.bodies); err != nil {
+			return err
+		}
+		f.outs, f.bodies = nil, nil
+		if err := insert(insertTable, f.rows); err != nil {
+			// one INSERT per flush, so the minute view sees each batch exactly once;
+			// on failure the rows stay and go with the next flush
+			return err
+		}
 	}
-	f.rows = nil
+	f.rows, f.outs, f.bodies = nil, nil, nil
 	f.lastSave = time.Now()
 	return nil
 }
