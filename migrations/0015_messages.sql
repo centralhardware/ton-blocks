@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS ton.out_messages (
     comment    String CODEC(ZSTD(3))
 )
 ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(now) -- whole months can be moved to cold storage later
 ORDER BY (account, lt, idx);
 
 CREATE TABLE IF NOT EXISTS ton.out_messages_buffer AS ton.out_messages
