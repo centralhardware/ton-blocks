@@ -264,15 +264,19 @@ func watchValidators(ctx context.Context, api ton.APIClientWrapped) {
 			if err != nil {
 				return err
 			}
-			cfg, err := api.GetBlockchainConfig(ctx, mc, 34, 36)
-			if err != nil {
-				return err
-			}
 			var rows []validatorRow
 			for _, p := range []uint8{34, 36} {
+				// one request per param: asking for an absent one fails the whole request
+				cfg, err := api.GetBlockchainConfig(ctx, mc, int32(p))
+				if p == 36 && err != nil && strings.Contains(err.Error(), "not found") {
+					continue // 36 exists only between an election and the switch
+				}
+				if err != nil {
+					return err
+				}
 				c := cfg.Get(int32(p))
 				if c == nil {
-					continue // 36 exists only between an election and the switch
+					continue
 				}
 				vs, err := validatorSet(c, p)
 				if err != nil {
