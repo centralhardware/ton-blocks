@@ -872,6 +872,9 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 		return err
 	}
 	f := &follower{api: api, dryRun: dryRun, traces: map[string]traced{}, lastSave: time.Now()}
+	if !dryRun {
+		go watchValidators(ctx, api)
+	}
 	nxt := start
 	if nxt == 0 && !dryRun {
 		if nxt, err = resumePoint(); err != nil {
@@ -1018,6 +1021,7 @@ func main() {
 		}
 		go resolveJettons()
 		go resolveContracts()
+		go resolveState()
 	}
 	if err := run(context.Background(), uint32(*from), *count, *dryRun, *verbose); err != nil {
 		log.Fatal(err)

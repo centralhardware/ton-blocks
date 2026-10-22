@@ -19,6 +19,9 @@ It's written in Go and reads blocks from the public liteservers through [tonutil
 | `code` | the code itself, once per distinct code hash: base64 BOC (bytecode), its TVM assembly (`asm`, from fift's Disasm.fif in the image), size, an example account | — |
 | `block_log` | one row per masterchain and shard block: time, transactions, producing validator (`created_by`), key block, split/merge flags, catchain seqno, node version | 90 days (TTL) |
 | `swaps` | DEX swaps (DeDust, STON.fi v1/v2): pool, user, token and amount in, token and amount out, trace | 90 days (TTL) |
+| `balances` | account balance in nanoton, re-read from toncenter after the account transacts (≤ every 5 min); latest = `argMax(balance, at)` | — |
+| `nft_items` / `nft_collections` | NFT item → collection, real owner, index, name, image, on sale; re-read after each NFT transfer | — |
+| `validators` | current (param 34) and next (36) validator sets: pubkey (= `block_log.created_by`), weight, share, ADNL | — |
 | `op_names` | name, protocol, description and source for known op codes, loaded from `op_names.tsv` on every start | — |
 
 The logger writes through a **Buffer** table, `transactions_buffer`. ClickHouse flushes it to `transactions` every 10–30 s, so `transactions` and the views behind it get about 2 parts a minute instead of one per insert. The buffer lives in ClickHouse's memory. A clean server shutdown flushes it, but a crash loses up to 30 s of rows. Every 5 minutes the logger checks the last ~25 minutes for masterchain blocks with no rows and fetches them again. If the server refuses the Buffer table, the logger inserts into `transactions` directly.
