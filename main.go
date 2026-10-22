@@ -60,6 +60,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/liteclient"
@@ -355,6 +356,7 @@ type row struct {
 	Op         *uint32 `json:"op"`
 	JettonAmt  *string `json:"jetton_amount"` // UInt128 as a decimal string
 	JettonPeer string  `json:"jetton_peer"`
+	Comment    string  `json:"comment"`
 	TotalFees  uint64  `json:"total_fees"`
 	Success    uint8   `json:"success"`
 	ExitCode   *int32  `json:"exit_code"`
@@ -419,6 +421,62 @@ func jettonAmount(m *tlb.Message) (*string, string) {
 		peer = a.StringRaw()
 	}
 	return &v, peer
+}
+
+// maxComment caps a stored comment; longer ones are cut at a rune boundary.
+const maxComment = 512
+
+// commentText is the text of a text-comment body (op 0) or of the forward payload
+// of a jetton transfer_notification (op 0x7362d09c), which is how a token
+// transfer's comment reaches the receiver; ” for anything else.
+func commentText(m *tlb.Message) string {
+	body := m.Msg.Payload()
+	if body == nil {
+		return ""
+	}
+	s, err := body.BeginParse()
+	if err != nil || s.BitsLeft() < 32 {
+		return ""
+	}
+	op, _ := s.LoadUInt(32)
+	if op == 0x7362d09c {
+		if _, err := s.LoadUInt(64); err != nil { // query_id
+			return ""
+		}
+		if _, err := s.LoadVarUInt(16); err != nil { // amount
+			return ""
+		}
+		if _, err := s.LoadAddr(); err != nil { // sender
+			return ""
+		}
+		inRef, err := s.LoadBoolBit() // forward_payload: Either Cell ^Cell
+		if err != nil {
+			return ""
+		}
+		if inRef {
+			if s, err = s.LoadRef(); err != nil {
+				return ""
+			}
+		}
+		if s.BitsLeft() < 32 {
+			return ""
+		}
+		op, _ = s.LoadUInt(32)
+	}
+	if op != 0 {
+		return ""
+	}
+	text, err := s.LoadStringSnake()
+	if err != nil || !utf8.ValidString(text) {
+		return ""
+	}
+	if len(text) > maxComment {
+		text = text[:maxComment]
+		for !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
+	}
+	return text
 }
 
 func opOf(m *tlb.Message) *uint32 {
@@ -522,6 +580,7 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 	if in := tx.IO.In; in != nil {
 		r.Op = opOf(in)
 		r.JettonAmt, r.JettonPeer = jettonAmount(in)
+		r.Comment = commentText(in)
 		if in.MsgType == tlb.MsgTypeInternal {
 			m := in.AsInternal()
 			r.Src = m.SrcAddr.StringRaw()
