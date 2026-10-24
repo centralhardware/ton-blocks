@@ -83,6 +83,9 @@ const (
 	// few blocks apart, and asking one that has not got the newest block yet
 	// fails with "not in db" (code 651)
 	confirmations = 3
+	// mc blocks fetched at once, each from whichever liteserver the pool
+	// picks; one at a time only just keeps up with the chain (~2/s)
+	fetchAhead = 8
 	// how long an outgoing message is remembered for linking its receiver into
 	// the sender's trace, in mc blocks (~30 min); traces practically finish in seconds
 	traceKeep = 3600
@@ -668,7 +671,6 @@ type traced struct {
 type follower struct {
 	api       ton.APIClientWrapped
 	dryRun    bool
-	prevTops  []*ton.BlockIDExt // shard tops of the last processed mc block
 	rows      []row
 	traces    map[string]traced // out message hash -> its trace
 	lastSave  time.Time
@@ -693,31 +695,73 @@ func connect(ctx context.Context) (ton.APIClientWrapped, error) {
 	}
 	// blocks are looked up by seqno and checked against their hashes by the
 	// liteserver; no proof chain from a trusted block is needed for logging
-	return ton.NewAPIClient(pool, ton.ProofCheckPolicyFast).WithTimeout(requestTimeout), nil
+	// WithRetry moves a "not in db" (651) to the next liteserver at once,
+	// instead of asking the lagging one again
+	return ton.NewAPIClient(pool, ton.ProofCheckPolicyFast).WithRetry(5).WithTimeout(requestTimeout), nil
 }
 
 func (f *follower) mcID(ctx context.Context, seqno uint32) (*ton.BlockIDExt, error) {
 	return f.api.LookupBlock(ctx, -1, math.MinInt64, seqno)
 }
 
-// oneBlock collects one block's transactions; returns the blocks it was built on.
-func (f *follower) oneBlock(ctx context.Context, blk *ton.BlockIDExt, txs *[]blockTx) ([]*ton.BlockIDExt, error) {
-	data, err := f.api.GetBlockData(ctx, blk)
+type fetchedBlock struct {
+	id   *ton.BlockIDExt
+	data *tlb.Block
+}
+
+// fetched is one mc block and every shard block it brought in, mc block first,
+// as read from the liteservers; nothing of the follower's state is touched, so
+// several are fetched at once.
+type fetched struct {
+	tops   []*ton.BlockIDExt
+	blocks []fetchedBlock
+}
+
+// fetch reads mc block seqno and the shard blocks it is the first to cover:
+// those not already under the previous mc block's shard tops.
+func (f *follower) fetch(ctx context.Context, seqno uint32) (*fetched, error) {
+	mc, err := f.mcID(ctx, seqno)
 	if err != nil {
 		return nil, err
 	}
-	list, err := data.ListTransactions()
+	data, err := f.api.GetBlockData(ctx, mc)
 	if err != nil {
 		return nil, err
 	}
-	for _, t := range list {
-		*txs = append(*txs, blockTx{blk, t})
+	fx := &fetched{blocks: []fetchedBlock{{mc, data}}}
+	if fx.tops, err = f.api.GetBlockShardsInfo(ctx, mc); err != nil {
+		return nil, err
 	}
-	f.blocks = append(f.blocks, newBlockRow(f.mcSeqno, blk, data, len(list)))
-	if blk.Workchain == -1 {
-		f.mcData = data
+	prev, err := ton.GetParentBlocks(&data.BlockInfo)
+	if err != nil {
+		return nil, err
 	}
-	return ton.GetParentBlocks(&data.BlockInfo)
+	prevTops, err := f.api.GetBlockShardsInfo(ctx, prev[0])
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	queue := append([]*ton.BlockIDExt(nil), fx.tops...)
+	for len(queue) > 0 {
+		b := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		key := fmt.Sprintf("%d:%d:%d", b.Workchain, b.Shard, b.SeqNo)
+		if seen[key] || covered(b, prevTops) {
+			continue
+		}
+		seen[key] = true
+		d, err := f.api.GetBlockData(ctx, b)
+		if err != nil {
+			return nil, err
+		}
+		fx.blocks = append(fx.blocks, fetchedBlock{b, d})
+		parents, err := ton.GetParentBlocks(&d.BlockInfo)
+		if err != nil {
+			return nil, err
+		}
+		queue = append(queue, parents...)
+	}
+	return fx, nil
 }
 
 func overlaps(a, b uint64) bool {
@@ -811,9 +855,20 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 // the buffer only once the whole mc block succeeded: a retry after a half-done
 // block must not insert its first blocks twice (the table would dedupe them on
 // merge, the summary views would not).
-func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error) {
+func (f *follower) process(ctx context.Context, seqno uint32) (int, error) {
+	fx, err := f.fetch(ctx, seqno)
+	if err != nil {
+		return 0, err
+	}
+	return f.apply(ctx, seqno, fx)
+}
+
+// apply turns a fetched mc block into rows; mc blocks must be applied in
+// order, for the traces.
+func (f *follower) apply(ctx context.Context, seqno uint32, fx *fetched) (_ int, err error) {
 	var txs []blockTx
 	f.mcSeqno = seqno
+	f.mcData = fx.blocks[0].data
 	nBlocks, nSwaps, nDNS, nOuts := len(f.blocks), len(f.swaps), len(f.dns), len(f.outs)
 	defer func() {
 		if err != nil { // the mc block is retried whole; drop its partial block rows
@@ -821,42 +876,15 @@ func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error)
 			f.outs = f.outs[:nOuts]
 		}
 	}()
-	mc, err := f.mcID(ctx, seqno)
-	if err != nil {
-		return 0, err
-	}
-	if _, err := f.oneBlock(ctx, mc, &txs); err != nil {
-		return 0, err
-	}
-	tops, err := f.api.GetBlockShardsInfo(ctx, mc)
-	if err != nil {
-		return 0, err
-	}
-	prevTops := f.prevTops
-	if prevTops == nil {
-		prev, err := f.mcID(ctx, seqno-1)
+	for _, b := range fx.blocks {
+		list, err := b.data.ListTransactions()
 		if err != nil {
 			return 0, err
 		}
-		if prevTops, err = f.api.GetBlockShardsInfo(ctx, prev); err != nil {
-			return 0, err
+		for _, t := range list {
+			txs = append(txs, blockTx{b.id, t})
 		}
-	}
-	seen := map[string]bool{}
-	queue := append([]*ton.BlockIDExt(nil), tops...)
-	for len(queue) > 0 {
-		b := queue[len(queue)-1]
-		queue = queue[:len(queue)-1]
-		key := fmt.Sprintf("%d:%d:%d", b.Workchain, b.Shard, b.SeqNo)
-		if seen[key] || covered(b, prevTops) {
-			continue
-		}
-		seen[key] = true
-		parents, err := f.oneBlock(ctx, b, &txs)
-		if err != nil {
-			return 0, err
-		}
-		queue = append(queue, parents...)
+		f.blocks = append(f.blocks, newBlockRow(seqno, b.id, b.data, len(list)))
 	}
 	rows, err := f.traceRows(seqno, txs)
 	if err != nil {
@@ -873,8 +901,7 @@ func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error)
 		log.Printf("mc %d config: %v", seqno, err)
 	}
 	f.rows = append(f.rows, rows...)
-	f.prevTops = tops
-	return len(seen) + 1, nil
+	return len(fx.blocks), nil
 }
 
 func (f *follower) flush(force bool) error {
@@ -950,7 +977,13 @@ func isNotInDB(err error) bool {
 		return ls.Code == 651
 	}
 	var lsp *ton.LSError
-	return errors.As(err, &lsp) && lsp.Code == 651
+	// LookupBlock reports a 651 as ErrBlockNotFound
+	return errors.As(err, &lsp) && lsp.Code == 651 || errors.Is(err, ton.ErrBlockNotFound)
+}
+
+type fetchResult struct {
+	fx  *fetched
+	err error
 }
 
 func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) error {
@@ -983,6 +1016,7 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 	log.Printf("following from mc seqno %d", nxt)
 	done, failures, transient := 0, 0, 0
 	first, lastCheck, lastNote := nxt, time.Now(), time.Now()
+	pending := map[uint32]chan fetchResult{} // fetches running ahead of nxt
 	for count == 0 || done < count {
 		err := func() error {
 			head, err := api.GetMasterchainInfo(ctx)
@@ -993,7 +1027,22 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 				time.Sleep(pollEvery)
 				return f.flush(false)
 			}
-			n, err := f.process(ctx, nxt)
+			for s := nxt; s < nxt+fetchAhead && s+confirmations <= head.SeqNo; s++ {
+				if _, ok := pending[s]; !ok {
+					ch := make(chan fetchResult, 1)
+					pending[s] = ch
+					go func(s uint32) {
+						fx, err := f.fetch(ctx, s)
+						ch <- fetchResult{fx, err}
+					}(s)
+				}
+			}
+			res := <-pending[nxt]
+			delete(pending, nxt)
+			if res.err != nil {
+				return res.err
+			}
+			n, err := f.apply(ctx, nxt, res.fx)
 			if err != nil {
 				return err
 			}
@@ -1028,12 +1077,10 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 						return err
 					}
 					for _, s := range lost {
-						f.prevTops = nil
 						if _, err := f.process(ctx, s); err != nil {
 							return err
 						}
 					}
-					f.prevTops = nil
 					return f.flush(true)
 				}
 			}
@@ -1042,7 +1089,6 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 		if err == nil {
 			continue
 		}
-		f.prevTops = nil
 		if isNotInDB(err) {
 			// a liteserver behind the others: just ask again (the pool picks
 			// another one); counted and reported once a minute
