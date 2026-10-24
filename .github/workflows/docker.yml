@@ -25,6 +25,7 @@ jobs:
       - name: Vet and smoke test (parse a few live blocks, no ClickHouse)
         run: |
           go vet ./...
+          go test ./...
           go run . -print-ddl > /dev/null
           timeout 120 go run . -dry-run -count 3
 
