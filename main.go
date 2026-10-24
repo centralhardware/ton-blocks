@@ -674,6 +674,7 @@ type follower struct {
 	lastSave  time.Time
 	blocks    []blockRow // flushed every blocksEvery: a few rows a second only
 	swaps     []swapRow  // likewise
+	dns       []dnsRow   // likewise
 	outs      []outRow   // flushed with rows
 	mcData    *tlb.Block // the mc block being processed, for config changes
 	vset      *vset
@@ -790,6 +791,11 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 			sw.Pool = fmt.Sprintf("%d:%x", bt.blk.Workchain, t.AccountAddr)
 			f.swaps = append(f.swaps, *sw)
 		}
+		if d := dnsChangeOf(t); d != nil {
+			d.Now, d.McSeqno, d.TraceID, d.Item = t.Now, mcSeqno, trace.String(), r.Account
+			d.Success = r.Success
+			f.dns = append(f.dns, *d)
+		}
 	}
 	if mcSeqno%100 == 0 {
 		for k, v := range f.traces {
@@ -808,10 +814,10 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 func (f *follower) process(ctx context.Context, seqno uint32) (_ int, err error) {
 	var txs []blockTx
 	f.mcSeqno = seqno
-	nBlocks, nSwaps, nOuts := len(f.blocks), len(f.swaps), len(f.outs)
+	nBlocks, nSwaps, nDNS, nOuts := len(f.blocks), len(f.swaps), len(f.dns), len(f.outs)
 	defer func() {
 		if err != nil { // the mc block is retried whole; drop its partial block rows
-			f.blocks, f.swaps = f.blocks[:nBlocks], f.swaps[:nSwaps]
+			f.blocks, f.swaps, f.dns = f.blocks[:nBlocks], f.swaps[:nSwaps], f.dns[:nDNS]
 			f.outs = f.outs[:nOuts]
 		}
 	}()
@@ -883,6 +889,9 @@ func (f *follower) flush(force bool) error {
 			if err := insert("swaps", f.swaps); err != nil {
 				return err
 			}
+			if err := insert("dns_changes", f.dns); err != nil {
+				return err
+			}
 			if err := insert("validator_signatures", f.sigRows()); err != nil {
 				return err
 			}
@@ -894,11 +903,15 @@ func (f *follower) flush(force bool) error {
 				first, _ := json.Marshal(f.swaps[0])
 				log.Printf("swaps: %d (first: %s)", len(f.swaps), first)
 			}
+			if len(f.dns) > 0 {
+				first, _ := json.Marshal(f.dns[0])
+				log.Printf("dns changes: %d (first: %s)", len(f.dns), first)
+			}
 			sigs, _ := json.Marshal(f.sigRows())
 			log.Printf("signatures: %.300s", sigs)
 			log.Printf("config changes: %d", len(f.configs))
 		}
-		f.blocks, f.swaps, f.configs = nil, nil, nil
+		f.blocks, f.swaps, f.dns, f.configs = nil, nil, nil, nil
 		f.sigs = map[sigKey]sigCount{}
 		f.blocksAt = time.Now()
 	}
