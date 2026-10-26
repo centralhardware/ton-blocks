@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /ton-blocks .
 # fift and its lib/ (Disasm.fif) from a TON release, for ton.code.asm. The
 # release fift is an AppImage; there is no FUSE in a container, so it is
 # extracted and run directly.
-FROM debian:12-slim AS fift
+FROM debian:13-slim AS fift
 ARG TON_RELEASE=v2026.10
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/*
@@ -24,7 +24,7 @@ RUN curl -fsSL -o fift https://github.com/ton-blockchain/ton/releases/download/$
 # debian-slim rather than distroless: fift needs glibc and libtinfo. Unlike
 # distroless it has no CA bundle, and without one every HTTPS call (the ton.org
 # liteserver config, toncenter) fails at start.
-FROM debian:12-slim
+FROM debian:13-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fift /opt/fift /opt/fift
