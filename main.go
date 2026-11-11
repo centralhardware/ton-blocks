@@ -378,6 +378,7 @@ type row struct {
 	OrigStatus      string            `json:"orig_status"`
 	EndStatus       string            `json:"end_status"`
 	TraceID         string            `json:"trace_id"` // UInt256 as a decimal string in JSON
+	TraceSeq        uint64            `json:"trace_seq"`
 	Hash            string            `json:"hash"`     // this transaction's hash, UInt256 likewise
 	TxType          string            `json:"tx_type"`
 	Destroyed       uint8             `json:"destroyed"`
@@ -574,7 +575,7 @@ func actionCode(tx *tlb.Transaction) *int32 {
 	return nil
 }
 
-func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.Int) row {
+func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.Int, seq uint64) row {
 	r := row{
 		Now:        tx.Now,
 		McSeqno:    mcSeqno,
@@ -590,6 +591,7 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 		OrigStatus: statuses[tx.OrigStatus],
 		EndStatus:  statuses[tx.EndStatus],
 		TraceID:    trace.String(),
+		TraceSeq:   seq,
 	}
 	r.ExitCode, r.SkipReason = exitCode(tx)
 	fees(tx, &r)
@@ -665,6 +667,7 @@ type blockTx struct {
 
 type traced struct {
 	trace *big.Int
+	seq   uint64 // trace_seq
 	seqno uint32
 }
 
@@ -673,6 +676,8 @@ type follower struct {
 	dryRun    bool
 	rows      []row
 	traces    map[string]traced // out message hash -> its trace
+	roots     map[string]traced // root tx hash -> its trace, so a refetched root keeps its number
+	lastSeq   uint64            // the last trace_seq handed out
 	lastSave  time.Time
 	blocks    []blockRow // flushed every blocksEvery: a few rows a second only
 	swaps     []swapRow  // likewise
@@ -796,8 +801,16 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 	for _, bt := range txs {
 		t := bt.tx
 		var trace *big.Int
+		var seq uint64
 		if in := t.IO.In; in == nil || in.MsgType != tlb.MsgTypeInternal {
 			trace = new(big.Int).SetBytes(t.Hash)
+			if p, ok := f.roots[string(t.Hash)]; ok {
+				seq = p.seq
+			} else {
+				f.lastSeq++
+				seq = f.lastSeq
+				f.roots[string(t.Hash)] = traced{trace, seq, mcSeqno}
+			}
 		} else {
 			c, err := in.ToCell()
 			if err != nil {
@@ -805,7 +818,7 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 			}
 			key := string(c.Hash())
 			if p, ok := f.traces[key]; ok {
-				trace = p.trace
+				trace, seq = p.trace, p.seq
 				delete(f.traces, key)
 			} else {
 				trace = new(big.Int)
@@ -824,19 +837,19 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 				if err != nil {
 					return nil, err
 				}
-				f.traces[string(c.Hash())] = traced{trace, mcSeqno}
+				f.traces[string(c.Hash())] = traced{trace, seq, mcSeqno}
 			}
 		}
-		r := txRow(bt.blk, mcSeqno, t, trace)
+		r := txRow(bt.blk, mcSeqno, t, trace, seq)
 		rows = append(rows, r)
-		f.outs = append(f.outs, outRows(t, r.Account, mcSeqno, trace)...)
+		f.outs = append(f.outs, outRows(t, r.Account, mcSeqno, trace, seq)...)
 		if sw := swapOf(t); sw != nil {
-			sw.Now, sw.McSeqno, sw.TraceID = t.Now, mcSeqno, trace.String()
+			sw.Now, sw.McSeqno, sw.TraceID, sw.TraceSeq = t.Now, mcSeqno, trace.String(), seq
 			sw.Pool = fmt.Sprintf("%d:%x", bt.blk.Workchain, t.AccountAddr)
 			f.swaps = append(f.swaps, *sw)
 		}
 		if d := dnsChangeOf(t); d != nil {
-			d.Now, d.McSeqno, d.TraceID, d.Item = t.Now, mcSeqno, trace.String(), r.Account
+			d.Now, d.McSeqno, d.TraceID, d.TraceSeq, d.Item = t.Now, mcSeqno, trace.String(), seq, r.Account
 			d.Success = r.Success
 			f.dns = append(f.dns, *d)
 		}
@@ -845,6 +858,11 @@ func (f *follower) traceRows(mcSeqno uint32, txs []blockTx) ([]row, error) {
 		for k, v := range f.traces {
 			if v.seqno+traceKeep < mcSeqno {
 				delete(f.traces, k)
+			}
+		}
+		for k, v := range f.roots {
+			if v.seqno+traceKeep < mcSeqno {
+				delete(f.roots, k)
 			}
 		}
 	}
@@ -991,12 +1009,15 @@ func run(ctx context.Context, start uint32, count int, dryRun, verbose bool) err
 	if err != nil {
 		return err
 	}
-	f := &follower{api: api, dryRun: dryRun, traces: map[string]traced{}, lastSave: time.Now(),
+	f := &follower{api: api, dryRun: dryRun, traces: map[string]traced{}, roots: map[string]traced{}, lastSave: time.Now(),
 		sigs: map[sigKey]sigCount{}, cfgHashes: map[int32]string{}}
 	if !dryRun {
 		go watchValidators(ctx, api)
 		go resolveSources(ctx, api)
 		if err := f.loadConfigHashes(); err != nil {
+			return err
+		}
+		if f.lastSeq, err = maxTraceSeq(); err != nil {
 			return err
 		}
 	}
@@ -1152,6 +1173,11 @@ func main() {
 		}
 		if err := loadOpNames(); err != nil {
 			log.Fatal(err)
+		}
+		if !*initOnly {
+			if err := backfillTraceSeq(); err != nil {
+				log.Fatal(err)
+			}
 		}
 		log.Print("tables ready")
 		if *initOnly {

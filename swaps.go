@@ -26,6 +26,7 @@ type swapRow struct {
 	Now       uint32 `json:"now"`
 	McSeqno   uint32 `json:"mc_seqno"`
 	TraceID   string `json:"trace_id"`
+	TraceSeq  uint64 `json:"trace_seq"`
 	Dex       string `json:"dex"`
 	Pool      string `json:"pool"`
 	User      string `json:"user"`
