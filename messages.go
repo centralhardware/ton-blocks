@@ -17,6 +17,7 @@ type outRow struct {
 	Now             uint32            `json:"now"`
 	McSeqno         uint32            `json:"mc_seqno"`
 	TraceID         string            `json:"trace_id"`
+	TraceSeq        uint64            `json:"trace_seq"`
 	Account         string            `json:"account"`
 	LT              uint64            `json:"lt"`
 	Idx             uint16            `json:"idx"`
@@ -33,10 +34,10 @@ type outRow struct {
 	ExtraCurrencies map[string]string `json:"extra_currencies"`
 }
 
-func outRows(tx *tlb.Transaction, account string, mcSeqno uint32, trace *big.Int) []outRow {
+func outRows(tx *tlb.Transaction, account string, mcSeqno uint32, trace *big.Int, seq uint64) []outRow {
 	var rows []outRow
 	for i, m := range outMessages(tx) {
-		r := outRow{Now: tx.Now, McSeqno: mcSeqno, TraceID: trace.String(), Account: account,
+		r := outRow{Now: tx.Now, McSeqno: mcSeqno, TraceID: trace.String(), TraceSeq: seq, Account: account,
 			LT: tx.LT, Idx: uint16(i), Op: opOf(&m), Comment: commentText(&m), ExtraCurrencies: map[string]string{}}
 		switch m.MsgType {
 		case tlb.MsgTypeInternal:

@@ -26,7 +26,8 @@ import (
 type dnsRow struct {
 	Now     uint32 `json:"now"`
 	McSeqno uint32 `json:"mc_seqno"`
-	TraceID string `json:"trace_id"`
+	TraceID  string `json:"trace_id"`
+	TraceSeq uint64 `json:"trace_seq"`
 	Item    string `json:"item"`
 	Sender  string `json:"sender"`
 	Key     string `json:"key"`
