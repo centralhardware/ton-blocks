@@ -1175,8 +1175,11 @@ func main() {
 			log.Fatal(err)
 		}
 		if !*initOnly {
+			// not fatal: without it (e.g. a missing grant) the logger still
+			// runs, and the next start tries again. Before the logger starts
+			// either way, so the two never hand out numbers at the same time.
 			if err := backfillTraceSeq(); err != nil {
-				log.Fatal(err)
+				log.Printf("trace_seq backfill skipped: %v", err)
 			}
 		}
 		log.Print("tables ready")
