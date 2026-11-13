@@ -379,7 +379,6 @@ type row struct {
 	EndStatus       string            `json:"end_status"`
 	TraceID         string            `json:"trace_id"` // UInt256 as a decimal string in JSON
 	TraceSeq        uint64            `json:"trace_seq"`
-	Hash            string            `json:"hash"`     // this transaction's hash, UInt256 likewise
 	TxType          string            `json:"tx_type"`
 	Destroyed       uint8             `json:"destroyed"`
 	GasLimit        uint64            `json:"gas_limit"`
@@ -596,7 +595,7 @@ func txRow(blk *ton.BlockIDExt, mcSeqno uint32, tx *tlb.Transaction, trace *big.
 	r.ExitCode, r.SkipReason = exitCode(tx)
 	fees(tx, &r)
 	details(tx, &r)
-	r.Hash, r.TxType = hashInt(tx.Hash), txType(tx)
+	r.TxType = txType(tx)
 	r.ExtraCurrencies = map[string]string{}
 	if a := descField(tx.Description, "Aborted"); a.IsValid() && a.Bool() {
 		r.Success = 0
